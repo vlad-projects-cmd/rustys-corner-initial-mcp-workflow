@@ -11,6 +11,9 @@ import pandas as pd
 from src.features import load_matches, build_team_match_history, compute_rolling_averages, get_fixture_features
 from src.model_poisson import compute_league_goal_rates, predict_match_from_features, PoissonConfig
 
+import json
+from datetime import datetime, timezone
+
 
 @dataclass(frozen=True)
 class RenderConfig:
@@ -18,6 +21,7 @@ class RenderConfig:
     top_scorelines: int = 5
     max_goals_grid: int = 5
     reports_dir: Path = Path("reports")
+    predictions_dir: Path = Path("data/predictions")
 
 
 def _pct(x: float) -> str:
@@ -42,7 +46,12 @@ def render_match_block(match_row: pd.Series, pred: Dict[str, object], feats: Dic
     lines.append(f"- Expected goals (λ): {pred['home_team']} {pred['lambda_home']:.2f} | {pred['away_team']} {pred['lambda_away']:.2f}")
     lines.append(f"- Outcome probabilities: Home {_pct(pred['p_home_win'])} | Draw {_pct(pred['p_draw'])} | Away {_pct(pred['p_away_win'])}")
     lines.append("")
-    top = pred["top_scorelines"]
+    top = pred.get("top_scorelines", [])
+    # top is like [("1-0", 0.21), ("2-0", 0.19), ...]
+    top3 = top[:3] + [("", 0.0)] * (3 - len(top[:3]))  # pad to 3
+    top_scoreline_1, top_scoreline_1_p = top3[0]
+    top_scoreline_2, top_scoreline_2_p = top3[1]
+    top_scoreline_3, top_scoreline_3_p = top3[2]
     top_str = ", ".join([f"{s} ({_pct(p)})" for s, p in top])
     lines.append(f"- Top scorelines: {top_str}")
     lines.append("")
@@ -54,6 +63,7 @@ def render_gameweek_outlook(
     gameweek: int,
     competition_id: int = 2021,
     cfg: RenderConfig = RenderConfig(),
+    save_predictions: bool = False,
 ) -> Path:
     """
     Generate a Markdown report for all fixtures in a Premier League gameweek.
@@ -92,16 +102,112 @@ def render_gameweek_outlook(
     md.append("---")
     md.append("")
 
+    pred_items = []
+    rank_rows = []
     for _, m in gw_matches.iterrows():
         match_id = int(m["match_id"])
         feats = get_fixture_features(match_id, team_history)
         pred = predict_match_from_features(feats, league_avg_team_goals, cfg=poisson_cfg, top_n_scorelines=cfg.top_scorelines)
+        top = pred.get("top_scorelines", [])
+        # Ensure we always have 3 for CSV columns
+        top3 = top[:3] + [("", 0.0)] * (3 - len(top[:3]))
+        top_scoreline_1, top_scoreline_1_p = top3[0]
+        top_scoreline_2, top_scoreline_2_p = top3[1]
+        top_scoreline_3, top_scoreline_3_p = top3[2]
+        # --- END BLOCK ---
+
+        # ... markdown rendering ...
         md.append(render_match_block(m, pred, feats))
         md.append("---")
         md.append("")
+        # Predicted outcome label (H/D/A) based on max probability
+        p_home = float(pred["p_home_win"])
+        p_draw = float(pred["p_draw"])
+        p_away = float(pred["p_away_win"])
+        predicted_outcome = max([("H", p_home), ("D", p_draw), ("A", p_away)], key=lambda x: x[1])[0]
+        pred_items.append(
+            {
+                "match_id": int(m["match_id"]),
+                "kickoff_utc": m["utc_date"].isoformat(),
+                "home_team": pred["home_team"],
+                "away_team": pred["away_team"],
+                "lambda_home": float(pred["lambda_home"]),
+                "lambda_away": float(pred["lambda_away"]),
+                "p_home_win": float(pred["p_home_win"]),
+                "p_draw": float(pred["p_draw"]),
+                "p_away_win": float(pred["p_away_win"]),
+                "predicted_outcome": predicted_outcome,
+                "top_scorelines": [(s, float(p)) for s, p in top],  # JSON-friendly
+                "top_scoreline_1": top_scoreline_1,
+                "top_scoreline_1_p": float(top_scoreline_1_p),
+                "top_scoreline_2": top_scoreline_2,
+                "top_scoreline_2_p": float(top_scoreline_2_p),
+                "top_scoreline_3": top_scoreline_3,
+                "top_scoreline_3_p": float(top_scoreline_3_p),
+            }
+        )
+        
+        conf = max(p_home, p_draw, p_away)
+        rank_rows.append({
+            "home": pred["home_team"],
+            "away": pred["away_team"],
+            "predicted_outcome": predicted_outcome,
+            "confidence": conf,
+            "top_scoreline": top_scoreline_1,
+            "top_scoreline_p": float(top_scoreline_1_p),
+        })
 
+    rank_rows = sorted(rank_rows, key=lambda r: r["confidence"], reverse=True)
+    top3 = rank_rows[:3]
+
+    summary = []
+    summary.append("## 🔝 Model picks – Gameweek {}".format(gameweek))
+    summary.append("")
+
+    for i, r in enumerate(top3, 1):
+        side = {"H": "HOME", "A": "AWAY", "D": "DRAW"}[r["predicted_outcome"]]
+        conf_pct = int(round(100 * r["confidence"]))
+        score = r["top_scoreline"]
+        score_p = int(round(100 * r["top_scoreline_p"])) if r["top_scoreline_p"] else None
+
+        line = f"{i}. {r['home']} vs {r['away']} — {side} ({conf_pct}%)"
+        if score:
+            line += f"\n   Most likely: {score}"
+            if score_p:
+                line += f" ({score_p}%)"
+
+        summary.append(line)
+        summary.append("")
+
+    md = md[:md.index('---')] + summary + ["---", ""] + md[md.index('---')+2:]
     out_path = cfg.reports_dir / f"gameweek_{gameweek}_season_{season}.md"
     out_path.write_text("\n".join(md), encoding="utf-8")
+    # Optionally save predictions for evaluation
+    if save_predictions:
+        season_dir = cfg.predictions_dir / f"season_{season}"
+        season_dir.mkdir(parents=True, exist_ok=True)
+        preds_path = season_dir / f"gameweek_{gameweek}.json"
+        # Also write a CSV for easy inspection
+        preds_csv = season_dir / f"gameweek_{gameweek}.csv"
+        pd.DataFrame(pred_items).to_csv(preds_csv, index=False)
+
+
+        payload = {
+            "season": season,
+            "competition_id": competition_id,
+            "gameweek": gameweek,
+            "generated_at_utc": datetime.now(timezone.utc).isoformat(),
+            "model": {
+                "window": cfg.window,
+                # keep these as documentation; update values if you changed them
+                "alpha": 0.7,
+                "min_ga": 0.6,
+                "max_goals_grid": cfg.max_goals_grid,
+            },
+            "predictions": pred_items,
+        }
+
+        preds_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     return out_path
 
 

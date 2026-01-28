@@ -8,6 +8,7 @@ from pathlib import Path
 
 from src.fetch import fetch_season_matches, FootballDataConfig
 from src.render import render_gameweek_outlook, RenderConfig
+from src.evaluate import evaluate_gameweek
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -34,6 +35,15 @@ def build_parser() -> argparse.ArgumentParser:
     p_out.add_argument("--top-scorelines", type=int, default=5, help="Top scorelines to show (default: 5)")
     p_out.add_argument("--max-goals-grid", type=int, default=5, help="Poisson grid max goals per team (default: 5)")
     p_out.add_argument("--reports-dir", type=str, default="reports", help="Output reports directory")
+    p_out.add_argument("--save-predictions", action="store_true", help="Save predictions JSON for evaluation")
+    p_out.add_argument("--predictions-dir", type=str, default="data/predictions", help="Predictions output directory")
+    
+    # evaluate
+    p_eval = sub.add_parser("evaluate", help="Evaluate predictions vs results for a gameweek.")
+    p_eval.add_argument("--season", type=int, required=True, help="Season year (e.g. 2025)")
+    p_eval.add_argument("--gameweek", type=int, required=True, help="Premier League matchday (gameweek)")
+    p_eval.add_argument("--append", action="store_true", help="Append per-match evaluation rows to ledger")
+    p_eval.add_argument("--refresh-cumulative", action="store_true", help="Regenerate cumulative performance artifacts")
 
     return p
 
@@ -59,16 +69,33 @@ def cmd_outlook(args: argparse.Namespace) -> int:
         top_scorelines=args.top_scorelines,
         max_goals_grid=args.max_goals_grid,
         reports_dir=Path(args.reports_dir),
+        predictions_dir=Path(args.predictions_dir),
     )
+
     out_path = render_gameweek_outlook(
         season=args.season,
         gameweek=args.gameweek,
         competition_id=args.competition_id,
         cfg=cfg,
+        save_predictions=args.save_predictions,
     )
+
     print(f"OK: wrote {out_path}")
     return 0
 
+def cmd_evaluate(args: argparse.Namespace) -> int:
+    df, summary, out_md = evaluate_gameweek(
+        season=args.season,
+        gameweek=args.gameweek,
+        append=args.append,
+        refresh_cumulative=args.refresh_cumulative,
+    )
+    print(f"OK: wrote {out_md}")
+    if args.append:
+        print("OK: appended to data/evaluation/all_matches.csv")
+    if args.refresh_cumulative:
+        print("OK: refreshed cumulative performance artifacts in reports/")
+    return 0
 
 def main() -> int:
     parser = build_parser()
@@ -78,6 +105,9 @@ def main() -> int:
         return cmd_fetch(args)
     if args.command == "outlook":
         return cmd_outlook(args)
+    if args.command == "evaluate":
+        return cmd_evaluate(args)
+
 
     raise RuntimeError("Unknown command")
 
