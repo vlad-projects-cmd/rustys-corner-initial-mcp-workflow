@@ -4,6 +4,9 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Dict, Optional
 import re
+import pandas as pd
+import json
+
 
 from mcp.server.fastmcp import FastMCP  # official Python SDK :contentReference[oaicite:2]{index=2}
 
@@ -50,6 +53,62 @@ def pl_fetch_season(
     out_csv = fetch_season_matches(season=season, cfg=cfg, force_refresh=force_refresh)
     return {"ok": True, "csv_path": str(out_csv)}
 
+@mcp.tool()
+def pl_curate(
+    seasons: list[int] = [2023, 2024, 2025],
+    competition_id: int = 2021,
+    processed_dir: str = "data/processed",
+    curated_dir: str = "data/curated",
+    out_format: str = "csv",  # "csv" or "parquet"
+) -> Dict[str, Any]:
+    """
+    Merge processed season CSVs into a single curated dataset + manifest.
+    """
+    processed = Path(processed_dir)
+    curated = Path(curated_dir)
+    curated.mkdir(parents=True, exist_ok=True)
+
+    seasons = sorted(set(seasons))
+    in_paths = []
+    for s in seasons:
+        p = processed / f"matches_comp_{competition_id}_season_{s}.csv"
+        if not p.exists():
+            raise FileNotFoundError(f"Missing processed file for season {s}: {p}")
+        in_paths.append(p)
+
+    dfs = [pd.read_csv(p, parse_dates=["utc_date"]) for p in in_paths]
+    merged = pd.concat(dfs, ignore_index=True)
+
+    if "match_id" in merged.columns:
+        merged = merged.drop_duplicates(subset=["match_id"], keep="last")
+
+    sort_cols = [c for c in ["utc_date", "match_id"] if c in merged.columns]
+    if sort_cols:
+        merged = merged.sort_values(sort_cols).reset_index(drop=True)
+
+    out_name = f"matches_comp_{competition_id}_seasons_{seasons[0]}_{seasons[-1]}.{out_format}"
+    out_path = curated / out_name
+
+    if out_format == "csv":
+        merged.to_csv(out_path, index=False)
+    elif out_format == "parquet":
+        merged.to_parquet(out_path, index=False)
+    else:
+        raise ValueError("out_format must be 'csv' or 'parquet'")
+
+    manifest = {
+        "competition_id": competition_id,
+        "seasons": seasons,
+        "input_files": [str(p) for p in in_paths],
+        "output_file": str(out_path),
+        "row_count": int(len(merged)),
+        "column_count": int(len(merged.columns)),
+        "dedupe_key": "match_id" if "match_id" in merged.columns else None,
+    }
+    manifest_path = curated / f"{out_path.stem}.manifest.json"
+    manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+
+    return {"ok": True, "curated_path": str(out_path), "manifest_path": str(manifest_path)}
 
 @mcp.tool()
 def pl_generate_outlook(
@@ -62,6 +121,12 @@ def pl_generate_outlook(
     reports_dir: str = "reports",
     predictions_dir: str = "data/predictions",
     save_predictions: bool = True,
+    # NEW:
+    model: str = "rolling",           # "rolling" or "strength"
+    half_life_days: float = 60.0,
+    l2: float = 1.0,
+    lr: float = 0.05,
+    max_iter: int = 250,
 ) -> Dict[str, Any]:
     """
     Generate the gameweek outlook markdown + (optionally) predictions JSON/CSV.
@@ -72,6 +137,13 @@ def pl_generate_outlook(
         max_goals_grid=max_goals_grid,
         reports_dir=Path(reports_dir),
         predictions_dir=Path(predictions_dir),
+
+        # NEW:
+        model=model,
+        half_life_days=half_life_days,
+        l2=l2,
+        lr=lr,
+        max_iter=max_iter,
     )
 
     md_path = render_gameweek_outlook(
@@ -82,17 +154,13 @@ def pl_generate_outlook(
         save_predictions=save_predictions,
     )
 
-    payload: Dict[str, Any] = {
-        "ok": True,
-        "report_path": str(md_path),
-    }
-
+    payload: Dict[str, Any] = {"ok": True, "report_path": str(md_path)}
     if save_predictions:
         season_dir = Path(predictions_dir) / f"season_{season}"
         payload["predictions_json"] = str(season_dir / f"gameweek_{gameweek}.json")
         payload["predictions_csv"] = str(season_dir / f"gameweek_{gameweek}.csv")
-
     return payload
+
 
 
 @mcp.tool()

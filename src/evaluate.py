@@ -21,10 +21,27 @@ class EvalConfig:
     reports_dir: Path = Path("reports")
 
 
-def load_matches_csv(season: int, competition_id: int, processed_dir: Path) -> pd.DataFrame:
+def load_matches_csv(
+    season: int,
+    competition_id: int,
+    processed_dir: Path,
+    curated_dir: Path = Path("data/curated"),
+) -> pd.DataFrame:
+    """
+    Prefer curated merged file; fallback to processed per-season.
+    """
+    curated_candidates = sorted(curated_dir.glob(f"matches_comp_{competition_id}_seasons_*.csv"))
+    if curated_candidates:
+        df_all = pd.read_csv(curated_candidates[-1], parse_dates=["utc_date"])
+        df = df_all[df_all["season"] == season].copy()
+        if not df.empty:
+            return df.sort_values("utc_date").reset_index(drop=True)
+
+    # fallback: processed per-season
     csv_path = processed_dir / f"matches_comp_{competition_id}_season_{season}.csv"
     df = pd.read_csv(csv_path, parse_dates=["utc_date"])
-    return df
+    return df.sort_values("utc_date").reset_index(drop=True)
+
 
 
 def load_predictions_json(path: Path) -> Dict[str, Any]:

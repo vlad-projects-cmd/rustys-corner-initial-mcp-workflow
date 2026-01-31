@@ -177,9 +177,12 @@ if __name__ == "__main__":
     from pathlib import Path
     from src.features import load_matches, build_team_match_history, compute_rolling_averages, get_fixture_features
 
-    csv_path = Path("data/processed/matches_comp_2021_season_2025.csv")
+    from src.features import resolve_matches_path
 
-    matches = load_matches(csv_path)
+    season = 2025
+    csv_path = resolve_matches_path(competition_id=2021, season=season)
+    matches = load_matches(csv_path, season=season)
+
     team_history = compute_rolling_averages(build_team_match_history(matches), window=5)
 
     league_rates = compute_league_goal_rates(matches)

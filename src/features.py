@@ -9,12 +9,32 @@ from typing import Dict
 
 DEFAULT_WINDOW = 5
 
+def resolve_matches_path(
+    competition_id: int = 2021,
+    season: int | None = None,
+    processed_dir: Path = Path("data/processed"),
+    curated_dir: Path = Path("data/curated"),
+) -> Path:
+    """
+    If season is None: return curated merged (must exist).
+    If season is provided: prefer curated merged + filter later, but return a path for loading.
+    """
+    curated_candidates = sorted(curated_dir.glob(f"matches_comp_{competition_id}_seasons_*.csv"))
+    if curated_candidates:
+        return curated_candidates[-1]
 
-def load_matches(csv_path: Path) -> pd.DataFrame:
+    if season is None:
+        raise FileNotFoundError(f"No curated dataset found in {curated_dir}")
+
+    return processed_dir / f"matches_comp_{competition_id}_season_{season}.csv"
+
+
+def load_matches(csv_path: Path, season: int | None = None) -> pd.DataFrame:
     df = pd.read_csv(csv_path, parse_dates=["utc_date"])
+    if season is not None and "season" in df.columns:
+        df = df[df["season"] == season].copy()
     df = df.sort_values("utc_date").reset_index(drop=True)
     return df
-
 
 def build_team_match_history(df: pd.DataFrame) -> pd.DataFrame:
     """
@@ -137,16 +157,16 @@ def get_fixture_features(
 
 
 if __name__ == "__main__":
-    csv_path = Path("data/processed/matches_comp_2021_season_2025.csv")
+    competition_id = 2021
+    season = 2025  # pick one season to build rolling features correctly
 
-    matches = load_matches(csv_path)
+    path = resolve_matches_path(competition_id=competition_id, season=season)
+    matches = load_matches(path, season=season)
+
     team_history = build_team_match_history(matches)
     team_history = compute_rolling_averages(team_history, window=5)
 
-    # sanity check: first match of season should have NaN or very small history
     sample_match_id = matches.iloc[0]["match_id"]
     print(get_fixture_features(sample_match_id, team_history))
-    
-    later_match_id = matches[matches["matchday"] == 5].iloc[0]["match_id"]
-    print(get_fixture_features(later_match_id, team_history))
+
 

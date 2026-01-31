@@ -179,9 +179,27 @@ def fetch_season_matches(
 
     return out_csv
 
+def fetch_multiple_seasons(
+    seasons: list[int],
+    cfg: FootballDataConfig = FootballDataConfig(),
+    force_refresh: bool = False,
+) -> list[Path]:
+    outputs = []
+    for season in seasons:
+        try:
+            out = fetch_season_matches(
+                season=season,
+                cfg=cfg,
+                force_refresh=force_refresh,
+            )
+            outputs.append(out)
+        except Exception as e:
+            print(f"[WARN] Failed season {season}: {e}")
+    return outputs
 
 if __name__ == "__main__":
     # quick manual run:
     # FOOTBALL_DATA_TOKEN=... python src/fetch.py
     csv_path = fetch_season_matches(season=2025)
+    # csv_path = fetch_multiple_seasons(list(range(2018, 2026)))
     print(f"Wrote: {csv_path}")
