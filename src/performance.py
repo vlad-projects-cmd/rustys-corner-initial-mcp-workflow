@@ -120,7 +120,7 @@ def plot_rolling(df_roll: pd.DataFrame, out_path: Path, title: str) -> None:
     plt.close()
 
 
-def write_performance_report(df: pd.DataFrame, season: int | None, cfg: PerfConfig) -> Path:
+def write_performance_report(df: pd.DataFrame, season: int | None, cfg: PerfConfig, suffix: str | None = None) -> Path:
     ensure_dirs(cfg)
 
     finished = df[df["status"] == "FINISHED"].copy()
@@ -154,6 +154,10 @@ def write_performance_report(df: pd.DataFrame, season: int | None, cfg: PerfConf
     out_md.write_text("\n".join(lines), encoding="utf-8")
     return out_md
 
+def available_models(df: pd.DataFrame) -> list[str]:
+    if "model_id" not in df.columns:
+        return []
+    return sorted(df["model_id"].dropna().astype(str).unique().tolist())
 
 def refresh_artifacts(season: int | None = None, cfg: PerfConfig = PerfConfig()) -> Dict[str, Path]:
     """
@@ -177,24 +181,47 @@ def refresh_artifacts(season: int | None = None, cfg: PerfConfig = PerfConfig())
     finished = df[df["status"] == "FINISHED"].copy()
     artifacts: Dict[str, Path] = {}
 
-    # performance report
-    artifacts["report"] = write_performance_report(df, season=season, cfg=cfg)
+    def run_one(df_one: pd.DataFrame, label: str) -> Dict[str, Path]:
+        finished_one = df_one[df_one["status"] == "FINISHED"].copy()
+        out: Dict[str, Path] = {}
 
-    # calibration
-    if not finished.empty:
-        calib = calibration_table(finished, n_bins=10)
-        calib_csv = cfg.reports_dir / f"reliability_table_{'season_'+str(season) if season else 'all'}.csv"
-        calib.to_csv(calib_csv, index=False)
-        artifacts["reliability_table"] = calib_csv
+        # report
+        out["report"] = write_performance_report(df_one, season=season, cfg=cfg, suffix=label)
 
-        calib_png = cfg.reports_dir / f"calibration_{'season_'+str(season) if season else 'all'}.png"
-        plot_calibration(calib, calib_png, title=f"Reliability — {'Season '+str(season) if season else 'All'}")
-        artifacts["calibration_plot"] = calib_png
+        # calibration + rolling
+        if not finished_one.empty:
+            calib = calibration_table(finished_one, n_bins=10)
+            calib_csv = cfg.reports_dir / f"reliability_table_{label}.csv"
+            calib.to_csv(calib_csv, index=False)
+            out["reliability_table"] = calib_csv
 
-        # rolling chart
-        df_roll = rolling_metrics(df, window=50)
-        roll_png = cfg.reports_dir / f"rolling_brier_{'season_'+str(season) if season else 'all'}.png"
-        plot_rolling(df_roll, roll_png, title=f"Rolling Brier (50-match) — {'Season '+str(season) if season else 'All'}")
-        artifacts["rolling_brier_plot"] = roll_png
+            calib_png = cfg.reports_dir / f"calibration_{label}.png"
+            plot_calibration(calib, calib_png, title=f"Reliability — {label}")
+            out["calibration_plot"] = calib_png
+
+            df_roll = rolling_metrics(df_one, window=50)
+            roll_png = cfg.reports_dir / f"rolling_brier_{label}.png"
+            plot_rolling(df_roll, roll_png, title=f"Rolling Brier (50-match) — {label}")
+            out["rolling_brier_plot"] = roll_png
+
+        return out
+
+    # Legacy: no model_id column -> behave as before
+    if "model_id" not in df.columns:
+        label = f"season_{season}" if season else "all"
+        artifacts.update(run_one(df, label))
+        return artifacts
+
+    # New: generate per-model artifacts
+    for mid in available_models(df):
+        dfm = df[df["model_id"] == mid].copy()
+        safe_mid = mid.replace("/", "_").replace(" ", "_")
+        label = f"{safe_mid}_{'season_'+str(season) if season else 'all'}"
+
+        arts = run_one(dfm, label)
+        # namespace keys to avoid collisions
+        for k, v in arts.items():
+            artifacts[f"{mid}:{k}"] = v
 
     return artifacts
+

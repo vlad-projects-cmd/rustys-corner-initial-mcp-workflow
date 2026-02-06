@@ -163,6 +163,16 @@ def evaluate_gameweek(
         )
 
     preds = load_predictions_json(preds_path)
+    model_id = preds.get("model_id")
+
+    # Backward compat: derive from preds["model"] if needed
+    if not model_id:
+        m = preds.get("model", {}) or {}
+        if m.get("type", "").startswith("strength"):
+            model_id = f"strength_hl{int(round(m.get('half_life_days', 60)))}_l2{float(m.get('l2', 1.0)):.2f}_g{int(m.get('max_goals_grid', 5))}"
+        else:
+            model_id = f"rolling_w{int(m.get('window', 5))}_g{int(m.get('max_goals_grid', 5))}"
+    
     items: List[Dict[str, Any]] = preds.get("predictions", [])
     if not items:
         raise ValueError(f"No predictions found in {preds_path}")
@@ -225,6 +235,7 @@ def evaluate_gameweek(
                     "home_goals_abs_err": None,
                     "away_goals_abs_err": None,
                     "total_goals_abs_err": None,
+                    "model_id": model_id
                 }
             )
             continue
@@ -259,6 +270,7 @@ def evaluate_gameweek(
                 "home_goals_abs_err": abs(lam_home - ah),
                 "away_goals_abs_err": abs(lam_away - aa),
                 "total_goals_abs_err": abs((lam_home + lam_away) - (ah + aa)),
+                "model_id": model_id
             }
         )
 

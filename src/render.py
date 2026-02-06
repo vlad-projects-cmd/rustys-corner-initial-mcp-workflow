@@ -119,6 +119,12 @@ def predict_from_lambdas(
         "top_scorelines": top_scorelines(grid, top_n=top_n),
     }
 
+def make_model_id(cfg: RenderConfig) -> str:
+    if cfg.model == "strength":
+        # keep it filename-safe and stable
+        return f"strength_hl{int(round(cfg.half_life_days))}_l2{cfg.l2:.2f}_lr{cfg.lr:.3f}_it{int(cfg.max_iter)}_g{cfg.max_goals_grid}"
+    return f"rolling_w{int(cfg.window)}_g{cfg.max_goals_grid}"
+
 
 def render_gameweek_outlook(
     season: int,
@@ -263,6 +269,7 @@ def render_gameweek_outlook(
                 "top_scoreline_2_p": float(top_scoreline_2_p),
                 "top_scoreline_3": top_scoreline_3,
                 "top_scoreline_3_p": float(top_scoreline_3_p),
+                "model_id": model_id,
             }
         )
 
@@ -341,6 +348,8 @@ def render_gameweek_outlook(
                     "league_avg_team_goals_fallback": league_avg_team_goals,
                 }
             )
+        
+        model_id = make_model_id(cfg)
 
         payload = {
             "season": season,
@@ -349,6 +358,8 @@ def render_gameweek_outlook(
             "generated_at_utc": datetime.now(timezone.utc).isoformat(),
             "model": model_meta,
             "predictions": pred_items,
+            "model_id": model_id,
+            "model": model_meta,
         }
         preds_json.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
