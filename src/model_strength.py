@@ -16,7 +16,7 @@ class StrengthConfig:
     l2: float = 1.0
     # Optimizer settings (simple GD; good enough for this scale)
     max_iter: int = 250
-    lr: float = 0.05
+    lr: float = 0.01
     tol: float = 1e-6
 
 
@@ -88,6 +88,11 @@ def fit_strength_model(
     theta = np.zeros(p, dtype=float)
 
     mean_goals = float(pd.concat([df["home_goals_ft"], df["away_goals_ft"]]).mean())
+    if (not math.isfinite(mean_goals)) or (mean_goals < 0.2):
+        raise ValueError(
+            f"Training data looks broken: mean_goals={mean_goals}. "
+            "Check goals columns and FINISHED filtering."
+        )
     theta[0] = math.log(max(mean_goals, 1e-6))
     theta[1] = 0.1
 
@@ -141,6 +146,12 @@ def fit_strength_model(
         if abs(prev - nll) < cfg.tol:
             break
         prev = nll
+        
+        # Gradient clipping to prevent numerical blow-ups
+        grad_norm = float(np.sqrt((grad * grad).sum()))
+        max_norm = 10.0
+        if grad_norm > max_norm:
+            grad = grad * (max_norm / (grad_norm + 1e-12))
 
         theta = theta - float(cfg.lr) * grad
 
@@ -149,6 +160,12 @@ def fit_strength_model(
         d = theta[2 + n : 2 + 2 * n]
         theta[2 : 2 + n] = a - a.mean()
         theta[2 + n : 2 + 2 * n] = d - d.mean()
+        
+        # Parameter clipping (keeps exp(.) in a sane range)
+        theta[0] = float(np.clip(theta[0], -2.0, 2.0))  # mu
+        theta[1] = float(np.clip(theta[1], -1.0, 1.0))  # home advantage
+        theta[2:] = np.clip(theta[2:], -3.0, 3.0)       # team params
+
 
     mu = float(theta[0])
     ha = float(theta[1])

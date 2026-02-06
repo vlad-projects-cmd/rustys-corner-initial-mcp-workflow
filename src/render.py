@@ -17,7 +17,7 @@ from src.features import (
 )
 from src.model_poisson import compute_league_goal_rates, predict_match_from_features, PoissonConfig
 from src.model_strength import fit_strength_model, StrengthConfig
-from src.model_poisson import scoreline_grid, outcome_probs, top_scorelines
+from src.model_poisson import scoreline_grid, scoreline_grid_dc, outcome_probs, top_scorelines
 
 
 @dataclass(frozen=True)
@@ -27,6 +27,8 @@ class RenderConfig:
     max_goals_grid: int = 5
     reports_dir: Path = Path("reports")
     predictions_dir: Path = Path("data/predictions")
+    dc_rho: float | None = None
+    include_prev_seasons: int = 0
 
     # Model selection
     model: str = "rolling"   # "rolling" or "strength"
@@ -107,8 +109,12 @@ def predict_from_lambdas(
     lambda_away: float,
     max_goals: int,
     top_n: int,
+    dc_rho: float | None = None
 ) -> Dict[str, Any]:
-    grid = scoreline_grid(lambda_home, lambda_away, max_goals)
+    if dc_rho is None:
+        grid = scoreline_grid(lambda_home, lambda_away, max_goals)
+    else:
+        grid = scoreline_grid_dc(lambda_home, lambda_away, max_goals, rho=dc_rho)
     probs = outcome_probs(grid)  # p_home_win, p_draw, p_away_win
     return {
         "home_team": home_team,
@@ -141,14 +147,19 @@ def render_gameweek_outlook(
 
     # Load season matches (curated preferred)
     matches = _load_matches_for_season(season=season, competition_id=competition_id)
+    train_matches = _load_training_matches(
+        season=season,
+        competition_id=competition_id,
+        include_prev_seasons=cfg.include_prev_seasons,
+    )
 
     # Subset fixtures for this gameweek
     gw_matches = matches[matches["matchday"] == gameweek].copy()
     if gw_matches.empty:
         raise ValueError(f"No matches found for season={season}, gameweek={gameweek}")
     gw_matches = gw_matches.sort_values("utc_date").reset_index(drop=True)
-
-    poisson_cfg = PoissonConfig(max_goals=cfg.max_goals_grid)
+    model_id = make_model_id(cfg)
+    poisson_cfg = PoissonConfig(max_goals=cfg.max_goals_grid, dc_rho=cfg.dc_rho)
 
     # --- Strength model setup (ONCE per gameweek), keyed by normalized kickoff timestamp ---
     strength_by_kickoff: Dict[pd.Timestamp, Any] = {}
@@ -165,16 +176,16 @@ def render_gameweek_outlook(
             ko_ts = pd.Timestamp(ko)
             if ko_ts.tzinfo is None:
                 ko_ts = ko_ts.tz_localize("UTC")
-            strength_by_kickoff[ko_ts] = fit_strength_model(matches, cutoff_utc=ko_ts, cfg=s_cfg)
+            strength_by_kickoff[ko_ts] = fit_strength_model(train_matches, cutoff_utc=ko_ts, cfg=s_cfg)
 
     # --- Rolling setup only if needed ---
     team_history = None
     league_avg_team_goals = None
     if cfg.model != "strength":
-        team_history = build_team_match_history(matches)
+        team_history = build_team_match_history(train_matches)
         team_history = compute_rolling_averages(team_history, window=cfg.window)
 
-        league_rates = compute_league_goal_rates(matches)
+        league_rates = compute_league_goal_rates(train_matches)
         league_avg_team_goals = float(league_rates["avg_team_goals"])
 
     # Markdown header
@@ -217,6 +228,7 @@ def render_gameweek_outlook(
                 lambda_away=lam_away,
                 max_goals=poisson_cfg.max_goals,
                 top_n=cfg.top_scorelines,
+                dc_rho=cfg.dc_rho,
             )
 
             feats = {
@@ -356,14 +368,37 @@ def render_gameweek_outlook(
             "competition_id": competition_id,
             "gameweek": gameweek,
             "generated_at_utc": datetime.now(timezone.utc).isoformat(),
-            "model": model_meta,
-            "predictions": pred_items,
             "model_id": model_id,
             "model": model_meta,
+            "predictions": pred_items,
         }
+
         preds_json.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
     return out_path
+
+def _load_training_matches(
+    season: int,
+    competition_id: int,
+    include_prev_seasons: int,
+    processed_dir: Path = Path("data/processed"),
+    curated_dir: Path = Path("data/curated"),
+) -> pd.DataFrame:
+    seasons = [season - i for i in range(include_prev_seasons, -1, -1)]
+    dfs = []
+    for s in seasons:
+        try:
+            dfs.append(_load_matches_for_season(s, competition_id, processed_dir, curated_dir))
+        except FileNotFoundError:
+            # If older seasons not available, skip
+            continue
+    if not dfs:
+        return _load_matches_for_season(season, competition_id, processed_dir, curated_dir)
+    df = pd.concat(dfs, ignore_index=True)
+    sort_cols = [c for c in ["utc_date", "match_id"] if c in df.columns]
+    if sort_cols:
+        df = df.sort_values(sort_cols, ascending=True).reset_index(drop=True)
+    return df
 
 
 if __name__ == "__main__":

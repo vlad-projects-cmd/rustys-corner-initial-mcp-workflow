@@ -12,16 +12,43 @@ import pandas as pd
 @dataclass(frozen=True)
 class PoissonConfig:
     max_goals: int = 5
+    dc_rho: Optional[float] = None  # Dixon–Coles rho (e.g. -0.10). None disables DC.
     # Fallback if we cannot compute team rolling stats (e.g. GW1). If None, derive from league avg.
     fallback_team_goals: Optional[float] = None
-    # Small epsilon to avoid weird edge cases
     eps: float = 1e-9
-
 
 def poisson_pmf(k: int, lam: float) -> float:
     # PMF = e^-λ * λ^k / k!
     lam = max(lam, 0.0)
     return math.exp(-lam) * (lam ** k) / math.factorial(k)
+
+def dixon_coles_tau(h: int, a: int, rho: float) -> float:
+    if h == 0 and a == 0:
+        return 1 - rho
+    if h == 0 and a == 1:
+        return 1 + rho
+    if h == 1 and a == 0:
+        return 1 + rho
+    if h == 1 and a == 1:
+        return 1 - rho
+    return 1.0
+
+def scoreline_grid_dc(
+    lambda_home: float,
+    lambda_away: float,
+    max_goals: int,
+    rho: float,
+) -> np.ndarray:
+    grid = np.zeros((max_goals + 1, max_goals + 1))
+
+    for h in range(max_goals + 1):
+        for a in range(max_goals + 1):
+            p = poisson_pmf(h, lambda_home) * poisson_pmf(a, lambda_away)
+            p *= dixon_coles_tau(h, a, rho)
+            grid[h, a] = p
+
+    grid /= grid.sum()  # renormalize
+    return grid
 
 
 def scoreline_grid(lam_home: float, lam_away: float, max_goals: int) -> np.ndarray:
@@ -160,7 +187,14 @@ def predict_match_from_features(
         cfg=cfg,
     )
 
-    grid = scoreline_grid(lam_home, lam_away, cfg.max_goals)
+    max_goals = cfg.max_goals
+    dc_rho = cfg.dc_rho
+
+    if dc_rho is not None:
+        grid = scoreline_grid_dc(lam_home, lam_away, max_goals=max_goals, rho=dc_rho)
+    else:
+        grid = scoreline_grid(lam_home, lam_away, max_goals=max_goals)
+
     probs = outcome_probs(grid)
     scorelines = top_scorelines(grid, top_n=top_n_scorelines)
 

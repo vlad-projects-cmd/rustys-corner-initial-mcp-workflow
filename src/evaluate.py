@@ -42,7 +42,16 @@ def load_matches_csv(
     df = pd.read_csv(csv_path, parse_dates=["utc_date"])
     return df.sort_values("utc_date").reset_index(drop=True)
 
-
+LEDGER_COLUMNS = [
+  "season","gameweek","match_id",
+  "home_team_name","away_team_name","kickoff_utc",
+  "status",
+  "p_home_win","p_draw","p_away_win",
+  "lambda_home","lambda_away",
+  "result_home_goals","result_away_goals",
+  "result_outcome",   # H/D/A (optional but consistent)
+  "model_id",
+]
 
 def load_predictions_json(path: Path) -> Dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))

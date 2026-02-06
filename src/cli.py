@@ -51,6 +51,15 @@ def build_parser() -> argparse.ArgumentParser:
     p_out.add_argument("--model", choices=["rolling", "strength"], default="rolling")
     p_out.add_argument("--lr", type=float, default=0.05)
     p_out.add_argument("--max-iter", type=int, default=250)
+    # Dixon–Coles + training history controls
+    p_out.add_argument("--dc-rho", type=float, default=None, help="Dixon–Coles rho (e.g. -0.10).")
+    p_out.add_argument(
+        "--include-prev-seasons",
+        type=int,
+        default=0,
+        help="How many previous seasons to include in training (0 = current season only).",
+    )
+
     
     # evaluate
     p_eval = sub.add_parser("evaluate", help="Evaluate predictions vs results for a gameweek.")
@@ -138,6 +147,9 @@ def cmd_outlook(args: argparse.Namespace) -> int:
         l2=args.l2,
         lr=args.lr,
         max_iter=args.max_iter,
+        dc_rho=args.dc_rho,
+        include_prev_seasons=args.include_prev_seasons,
+
     )
 
     out_path = render_gameweek_outlook(
