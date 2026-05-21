@@ -23,6 +23,9 @@ class PoissonConfig:
     # Lambda clamp range
     lambda_min: float = 0.2
     lambda_max: float = 4.0
+    # Home/away venue split weight: blend venue-specific stats with overall stats
+    # 0 = ignore venue splits (use overall only), 1 = use venue splits only
+    venue_weight: float = 0.5
 
 
 def poisson_pmf(k: int, lam: float) -> float:
@@ -156,17 +159,53 @@ def expected_goals_proxy(
     return lam_home, lam_away
 
 
+def _blend_venue_features(features: Dict[str, float], venue_weight: float) -> Tuple[float, float, float, float]:
+    """
+    Blend overall rolling stats with venue-specific stats.
+    Returns (home_gf, home_ga, away_gf, away_ga) after blending.
+    """
+    vw = venue_weight
+
+    home_gf_overall = features["home_gf_avg"]
+    home_ga_overall = features["home_ga_avg"]
+    away_gf_overall = features["away_gf_avg"]
+    away_ga_overall = features["away_ga_avg"]
+
+    # Venue-specific (may be NaN if not enough venue-specific data)
+    home_gf_venue = features.get("home_gf_at_home", float("nan"))
+    home_ga_venue = features.get("home_ga_at_home", float("nan"))
+    away_gf_venue = features.get("away_gf_at_away", float("nan"))
+    away_ga_venue = features.get("away_ga_at_away", float("nan"))
+
+    def _blend(overall: float, venue: float) -> float:
+        if venue is None or (isinstance(venue, float) and math.isnan(venue)):
+            return overall
+        if overall is None or (isinstance(overall, float) and math.isnan(overall)):
+            return venue
+        return vw * venue + (1 - vw) * overall
+
+    return (
+        _blend(home_gf_overall, home_gf_venue),
+        _blend(home_ga_overall, home_ga_venue),
+        _blend(away_gf_overall, away_gf_venue),
+        _blend(away_ga_overall, away_ga_venue),
+    )
+
+
 def predict_match_from_features(
     features: Dict[str, float],
     league_avg_team_goals: float,
     cfg: PoissonConfig = PoissonConfig(),
     top_n_scorelines: int = 5,
 ) -> Dict[str, object]:
+    # Blend venue-specific and overall features
+    home_gf, home_ga, away_gf, away_ga = _blend_venue_features(features, cfg.venue_weight)
+
     lam_home, lam_away = expected_goals_proxy(
-        home_gf=features["home_gf_avg"],
-        home_ga=features["home_ga_avg"],
-        away_gf=features["away_gf_avg"],
-        away_ga=features["away_ga_avg"],
+        home_gf=home_gf,
+        home_ga=home_ga,
+        away_gf=away_gf,
+        away_ga=away_ga,
         league_avg_team_goals=league_avg_team_goals,
         cfg=cfg,
     )

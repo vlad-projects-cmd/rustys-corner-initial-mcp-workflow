@@ -103,8 +103,12 @@ def football_generate_outlook(
     l2: float = 1.0,
     lr: float = 0.05,
     max_iter: int = 250,
+    venue_weight: float = 0.5,
+    elo_k: float = 30.0,
+    elo_home_advantage: float = 65.0,
+    elo_season_carryover: float = 0.6,
 ) -> Dict[str, Any]:
-    """Generate the gameweek outlook markdown + (optionally) predictions JSON/CSV. Supports any league."""
+    """Generate the gameweek outlook markdown + predictions. Models: rolling, strength, elo, ensemble."""
     comp_id = resolve_competition(league, competition_id)
     cfg = RenderConfig(
         window=window,
@@ -117,6 +121,10 @@ def football_generate_outlook(
         l2=l2,
         lr=lr,
         max_iter=max_iter,
+        venue_weight=venue_weight,
+        elo_k=elo_k,
+        elo_home_advantage=elo_home_advantage,
+        elo_season_carryover=elo_season_carryover,
     )
 
     md_path = render_gameweek_outlook(

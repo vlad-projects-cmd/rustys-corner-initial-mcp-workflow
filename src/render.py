@@ -22,6 +22,8 @@ from src.model_poisson import (
     top_scorelines,
 )
 from src.model_strength import StrengthConfig, fit_strength_model
+from src.model_elo import EloConfig, build_elo_ratings, predict_match_elo
+from src.model_ensemble import EnsembleConfig, ensemble_with_lambdas
 
 
 @dataclass(frozen=True)
@@ -34,14 +36,27 @@ class RenderConfig:
     dc_rho: float | None = None
     include_prev_seasons: int = 0
 
-    # Model selection
-    model: str = "rolling"   # "rolling" or "strength"
+    # Model selection: "rolling", "strength", "elo", "ensemble"
+    model: str = "rolling"
 
     # Strength model params
     half_life_days: float = 60.0
     l2: float = 1.0
     lr: float = 0.05
     max_iter: int = 250
+
+    # Elo params
+    elo_k: float = 30.0
+    elo_home_advantage: float = 65.0
+    elo_season_carryover: float = 0.6
+
+    # Ensemble weights
+    ensemble_weight_rolling: float = 0.35
+    ensemble_weight_strength: float = 0.35
+    ensemble_weight_elo: float = 0.30
+
+    # Venue split weight for rolling model (0=overall only, 1=venue only)
+    venue_weight: float = 0.5
 
 
 def _pct(x: float) -> str:
@@ -59,7 +74,11 @@ def _fmt_dt(dt: pd.Timestamp) -> str:
 def make_model_id(cfg: RenderConfig) -> str:
     if cfg.model == "strength":
         return f"strength_hl{int(round(cfg.half_life_days))}_l2{cfg.l2:.2f}_lr{cfg.lr:.3f}_it{int(cfg.max_iter)}_g{cfg.max_goals_grid}"
-    return f"rolling_w{int(cfg.window)}_g{cfg.max_goals_grid}"
+    if cfg.model == "elo":
+        return f"elo_k{int(cfg.elo_k)}_ha{int(cfg.elo_home_advantage)}_co{cfg.elo_season_carryover:.1f}"
+    if cfg.model == "ensemble":
+        return f"ensemble_r{cfg.ensemble_weight_rolling:.0%}_s{cfg.ensemble_weight_strength:.0%}_e{cfg.ensemble_weight_elo:.0%}_g{cfg.max_goals_grid}"
+    return f"rolling_w{int(cfg.window)}_vw{cfg.venue_weight:.1f}_g{cfg.max_goals_grid}"
 
 
 def predict_from_lambdas(
@@ -96,6 +115,7 @@ def predict_gameweek(
 ) -> tuple[pd.DataFrame, List[Dict[str, Any]]]:
     """
     Generate predictions for all fixtures in a gameweek.
+    Supports models: rolling, strength, elo, ensemble.
     Returns (gw_matches DataFrame, list of prediction dicts).
     """
     matches = load_matches_for_season(season=season, competition_id=competition_id)
@@ -110,12 +130,20 @@ def predict_gameweek(
         raise ValueError(f"No matches found for season={season}, gameweek={gameweek}")
     gw_matches = gw_matches.sort_values("utc_date").reset_index(drop=True)
 
-    poisson_cfg = PoissonConfig(max_goals=cfg.max_goals_grid, dc_rho=cfg.dc_rho)
+    poisson_cfg = PoissonConfig(
+        max_goals=cfg.max_goals_grid,
+        dc_rho=cfg.dc_rho,
+        venue_weight=cfg.venue_weight,
+    )
     model_id = make_model_id(cfg)
 
-    # Strength model setup
+    needs_rolling = cfg.model in ("rolling", "ensemble")
+    needs_strength = cfg.model in ("strength", "ensemble")
+    needs_elo = cfg.model in ("elo", "ensemble")
+
+    # --- Setup: Strength model ---
     strength_by_kickoff: Dict[pd.Timestamp, Any] = {}
-    if cfg.model == "strength":
+    if needs_strength:
         s_cfg = StrengthConfig(
             half_life_days=cfg.half_life_days,
             l2=cfg.l2,
@@ -129,49 +157,133 @@ def predict_gameweek(
                 ko_ts = ko_ts.tz_localize("UTC")
             strength_by_kickoff[ko_ts] = fit_strength_model(train_matches, cutoff_utc=ko_ts, cfg=s_cfg)
 
-    # Rolling setup
+    # --- Setup: League averages (always needed for fallbacks) ---
+    league_rates = compute_league_goal_rates(train_matches)
+    league_avg_team_goals = float(league_rates["avg_team_goals"])
+
+    # --- Setup: Rolling model ---
     team_history = None
-    league_avg_team_goals = None
-    if cfg.model != "strength":
+    if needs_rolling:
         team_history = build_team_match_history(train_matches)
         team_history = compute_rolling_averages(team_history, window=cfg.window)
-        league_rates = compute_league_goal_rates(train_matches)
-        league_avg_team_goals = float(league_rates["avg_team_goals"])
+
+    # --- Setup: Elo model ---
+    elo_state = None
+    if needs_elo:
+        elo_cfg = EloConfig(
+            k=cfg.elo_k,
+            home_advantage=cfg.elo_home_advantage,
+            season_carryover=cfg.elo_season_carryover,
+        )
+        # Use earliest kickoff as cutoff for Elo state
+        earliest_ko = pd.Timestamp(gw_matches["utc_date"].min())
+        if earliest_ko.tzinfo is None:
+            earliest_ko = earliest_ko.tz_localize("UTC")
+        elo_state = build_elo_ratings(train_matches, cutoff_utc=earliest_ko, cfg=elo_cfg)
 
     pred_items: List[Dict[str, Any]] = []
 
     for _, m in gw_matches.iterrows():
-        if cfg.model == "strength":
+        home_team_id = int(m["home_team_id"])
+        away_team_id = int(m["away_team_id"])
+        home_team_name = m["home_team_name"]
+        away_team_name = m["away_team_name"]
+
+        # --- Rolling prediction ---
+        pred_rolling = None
+        feats = {
+            "home_gf_avg": float("nan"),
+            "home_ga_avg": float("nan"),
+            "away_gf_avg": float("nan"),
+            "away_ga_avg": float("nan"),
+        }
+        if needs_rolling:
+            feats = get_fixture_features(int(m["match_id"]), team_history)
+            pred_rolling = predict_match_from_features(
+                feats,
+                league_avg_team_goals,
+                cfg=poisson_cfg,
+                top_n_scorelines=cfg.top_scorelines,
+            )
+
+        # --- Strength prediction ---
+        pred_strength = None
+        if needs_strength:
             ko_ts = pd.Timestamp(m["utc_date"])
             if ko_ts.tzinfo is None:
                 ko_ts = ko_ts.tz_localize("UTC")
-
             strength = strength_by_kickoff[ko_ts]
-            lam_home, lam_away = strength.expected_goals(int(m["home_team_id"]), int(m["away_team_id"]))
-
-            pred = predict_from_lambdas(
-                home_team=m["home_team_name"],
-                away_team=m["away_team_name"],
+            lam_home, lam_away = strength.expected_goals(home_team_id, away_team_id)
+            pred_strength = predict_from_lambdas(
+                home_team=home_team_name,
+                away_team=away_team_name,
                 lambda_home=lam_home,
                 lambda_away=lam_away,
                 max_goals=poisson_cfg.max_goals,
                 top_n=cfg.top_scorelines,
                 dc_rho=cfg.dc_rho,
             )
-            feats = {
-                "home_gf_avg": float("nan"),
-                "home_ga_avg": float("nan"),
-                "away_gf_avg": float("nan"),
-                "away_ga_avg": float("nan"),
+
+        # --- Elo prediction ---
+        pred_elo = None
+        if needs_elo:
+            elo_probs = predict_match_elo(home_team_id, away_team_id, elo_state)
+            pred_elo = {
+                "p_home_win": elo_probs["p_home_win"],
+                "p_draw": elo_probs["p_draw"],
+                "p_away_win": elo_probs["p_away_win"],
+                # Elo doesn't produce lambdas natively; skip
             }
-        else:
-            feats = get_fixture_features(int(m["match_id"]), team_history)
-            pred = predict_match_from_features(
-                feats,
-                league_avg_team_goals,
-                cfg=poisson_cfg,
-                top_n_scorelines=cfg.top_scorelines,
+
+        # --- Select or ensemble final prediction ---
+        if cfg.model == "ensemble":
+            combined = ensemble_with_lambdas(
+                predictions=[pred_rolling, pred_strength, pred_elo],
+                weights=[cfg.ensemble_weight_rolling, cfg.ensemble_weight_strength, cfg.ensemble_weight_elo],
             )
+            # Generate scorelines from ensembled lambdas
+            pred = predict_from_lambdas(
+                home_team=home_team_name,
+                away_team=away_team_name,
+                lambda_home=combined["lambda_home"],
+                lambda_away=combined["lambda_away"],
+                max_goals=poisson_cfg.max_goals,
+                top_n=cfg.top_scorelines,
+                dc_rho=cfg.dc_rho,
+            )
+            # Override probs with ensemble-averaged probs (more accurate than re-deriving from averaged lambdas)
+            pred["p_home_win"] = combined["p_home_win"]
+            pred["p_draw"] = combined["p_draw"]
+            pred["p_away_win"] = combined["p_away_win"]
+        elif cfg.model == "elo":
+            # Elo doesn't produce scorelines; derive from rating-implied lambdas
+            # Use a rough lambda estimate based on probabilities
+            p_h = pred_elo["p_home_win"]
+            p_a = pred_elo["p_away_win"]
+            # Approximate: higher win prob -> higher lambda
+            avg_goals = league_avg_team_goals if league_avg_team_goals else 1.35
+            lam_h = avg_goals * (1.0 + 0.8 * (p_h - 0.33))
+            lam_a = avg_goals * (1.0 + 0.8 * (p_a - 0.33))
+            lam_h = max(0.3, min(3.5, lam_h))
+            lam_a = max(0.3, min(3.5, lam_a))
+            pred = predict_from_lambdas(
+                home_team=home_team_name,
+                away_team=away_team_name,
+                lambda_home=lam_h,
+                lambda_away=lam_a,
+                max_goals=poisson_cfg.max_goals,
+                top_n=cfg.top_scorelines,
+                dc_rho=cfg.dc_rho,
+            )
+            # Override probs with Elo's direct predictions (more calibrated)
+            pred["p_home_win"] = pred_elo["p_home_win"]
+            pred["p_draw"] = pred_elo["p_draw"]
+            pred["p_away_win"] = pred_elo["p_away_win"]
+        elif cfg.model == "strength":
+            pred = pred_strength
+        else:
+            # rolling
+            pred = pred_rolling
 
         top = pred.get("top_scorelines", [])
         top3 = top[:3] + [("", 0.0)] * (3 - len(top[:3]))
@@ -333,7 +445,13 @@ def write_predictions(
 
     pd.DataFrame(clean_items).to_csv(preds_csv, index=False)
 
-    model_type = "strength_attack_defence_poisson" if cfg.model == "strength" else "rolling_gf_ga_poisson"
+    model_types = {
+        "rolling": "rolling_gf_ga_venue_split_poisson",
+        "strength": "strength_attack_defence_poisson",
+        "elo": "elo_rating_system",
+        "ensemble": "ensemble_rolling_strength_elo",
+    }
+    model_type = model_types.get(cfg.model, cfg.model)
     model_meta: Dict[str, Any] = {
         "type": model_type,
         "max_goals_grid": cfg.max_goals_grid,
@@ -346,8 +464,21 @@ def write_predictions(
             "lr": cfg.lr,
             "max_iter": cfg.max_iter,
         })
+    elif cfg.model == "elo":
+        model_meta.update({
+            "k": cfg.elo_k,
+            "home_advantage": cfg.elo_home_advantage,
+            "season_carryover": cfg.elo_season_carryover,
+        })
+    elif cfg.model == "ensemble":
+        model_meta.update({
+            "weight_rolling": cfg.ensemble_weight_rolling,
+            "weight_strength": cfg.ensemble_weight_strength,
+            "weight_elo": cfg.ensemble_weight_elo,
+        })
     else:
         model_meta["window"] = cfg.window
+        model_meta["venue_weight"] = cfg.venue_weight
 
     model_id = make_model_id(cfg)
     payload = {
@@ -381,12 +512,10 @@ def render_gameweek_outlook(
 
     gw_matches, pred_items = predict_gameweek(season, gameweek, competition_id, cfg)
 
-    # Compute league avg for display (only for rolling model)
-    league_avg = None
-    if cfg.model != "strength":
-        train_matches = load_training_matches(season=season, competition_id=competition_id, include_prev_seasons=cfg.include_prev_seasons)
-        league_rates = compute_league_goal_rates(train_matches)
-        league_avg = float(league_rates["avg_team_goals"])
+    # Compute league avg for display
+    train_matches = load_training_matches(season=season, competition_id=competition_id, include_prev_seasons=cfg.include_prev_seasons)
+    league_rates = compute_league_goal_rates(train_matches)
+    league_avg = float(league_rates["avg_team_goals"])
 
     md_text = render_outlook_markdown(season, gameweek, gw_matches, pred_items, cfg, league_avg)
 

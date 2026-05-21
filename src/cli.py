@@ -63,12 +63,17 @@ def build_parser() -> argparse.ArgumentParser:
     p_out.add_argument("--predictions-dir", type=str, default="data/predictions", help="Predictions output directory")
     p_out.add_argument("--half-life-days", type=float, default=60.0)
     p_out.add_argument("--l2", type=float, default=1.0)
-    p_out.add_argument("--model", choices=["rolling", "strength"], default="rolling")
+    p_out.add_argument("--model", choices=["rolling", "strength", "elo", "ensemble"], default="rolling")
     p_out.add_argument("--lr", type=float, default=0.05)
     p_out.add_argument("--max-iter", type=int, default=250)
     p_out.add_argument("--dc-rho", type=float, default=None, help="Dixon-Coles rho (e.g. -0.10).")
     p_out.add_argument("--include-prev-seasons", type=int, default=0,
                        help="How many previous seasons to include in training (0 = current season only).")
+    p_out.add_argument("--venue-weight", type=float, default=0.5,
+                       help="Home/away venue split weight for rolling model (0=overall only, 1=venue only, default: 0.5)")
+    p_out.add_argument("--elo-k", type=float, default=30.0, help="Elo K-factor (default: 30)")
+    p_out.add_argument("--elo-home-advantage", type=float, default=65.0, help="Elo home advantage in points (default: 65)")
+    p_out.add_argument("--elo-season-carryover", type=float, default=0.6, help="Elo season carryover (default: 0.6)")
 
     # evaluate
     p_eval = sub.add_parser("evaluate", help="Evaluate predictions vs results for a gameweek.")
@@ -160,6 +165,10 @@ def cmd_outlook(args: argparse.Namespace) -> int:
         max_iter=args.max_iter,
         dc_rho=args.dc_rho,
         include_prev_seasons=args.include_prev_seasons,
+        venue_weight=args.venue_weight,
+        elo_k=args.elo_k,
+        elo_home_advantage=args.elo_home_advantage,
+        elo_season_carryover=args.elo_season_carryover,
     )
 
     out_path = render_gameweek_outlook(
