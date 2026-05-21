@@ -58,6 +58,9 @@ def _request_with_retries(
 
             # Handle rate limiting and transient errors
             if resp.status_code in (429, 500, 502, 503, 504):
+                last_err = FootballDataAPIError(
+                    f"HTTP {resp.status_code} for {url} (attempt {attempt})"
+                )
                 retry_after = resp.headers.get("Retry-After")
                 sleep_s = float(retry_after) if retry_after else (backoff_s ** attempt)
                 time.sleep(sleep_s)

@@ -3,30 +3,14 @@
 from __future__ import annotations
 
 from pathlib import Path
-import pandas as pd
 from typing import Dict
+
+import pandas as pd
+
+from src.data_loader import load_matches_for_season
 
 
 DEFAULT_WINDOW = 5
-
-def resolve_matches_path(
-    competition_id: int = 2021,
-    season: int | None = None,
-    processed_dir: Path = Path("data/processed"),
-    curated_dir: Path = Path("data/curated"),
-) -> Path:
-    """
-    If season is None: return curated merged (must exist).
-    If season is provided: prefer curated merged + filter later, but return a path for loading.
-    """
-    curated_candidates = sorted(curated_dir.glob(f"matches_comp_{competition_id}_seasons_*.csv"))
-    if curated_candidates:
-        return curated_candidates[-1]
-
-    if season is None:
-        raise FileNotFoundError(f"No curated dataset found in {curated_dir}")
-
-    return processed_dir / f"matches_comp_{competition_id}_season_{season}.csv"
 
 
 def load_matches(csv_path: Path, season: int | None = None) -> pd.DataFrame:
@@ -36,13 +20,11 @@ def load_matches(csv_path: Path, season: int | None = None) -> pd.DataFrame:
     df = df.sort_values("utc_date").reset_index(drop=True)
     return df
 
+
 def build_team_match_history(df: pd.DataFrame) -> pd.DataFrame:
     """
     Transform match-level data into team-level rows.
-
-    One match -> two rows:
-    - home team row
-    - away team row
+    One match -> two rows (home team row + away team row).
     """
     home = df[
         [
@@ -103,23 +85,17 @@ def compute_rolling_averages(
     """
     Compute rolling GF/GA per team without leakage.
 
-    IMPORTANT:
-    - shift(1) ensures current match is excluded
+    Uses transform with shift(1) inside each group to prevent
+    rolling windows from bleeding across team boundaries.
     """
     team_matches = team_matches.copy()
 
-    team_matches["gf_roll"] = (
-        team_matches.groupby("team_id")["goals_for"]
-        .shift(1)
-        .rolling(window, min_periods=1)
-        .mean()
+    team_matches["gf_roll"] = team_matches.groupby("team_id")["goals_for"].transform(
+        lambda x: x.shift(1).rolling(window, min_periods=1).mean()
     )
 
-    team_matches["ga_roll"] = (
-        team_matches.groupby("team_id")["goals_against"]
-        .shift(1)
-        .rolling(window, min_periods=1)
-        .mean()
+    team_matches["ga_roll"] = team_matches.groupby("team_id")["goals_against"].transform(
+        lambda x: x.shift(1).rolling(window, min_periods=1).mean()
     )
 
     return team_matches
@@ -131,12 +107,6 @@ def get_fixture_features(
 ) -> Dict[str, float]:
     """
     Extract features for a single fixture.
-
-    Returns a dict keyed by:
-    - home_gf_avg
-    - home_ga_avg
-    - away_gf_avg
-    - away_ga_avg
     """
     rows = team_matches[team_matches["match_id"] == match_id]
 
@@ -157,16 +127,11 @@ def get_fixture_features(
 
 
 if __name__ == "__main__":
-    competition_id = 2021
-    season = 2025  # pick one season to build rolling features correctly
+    season = 2025
 
-    path = resolve_matches_path(competition_id=competition_id, season=season)
-    matches = load_matches(path, season=season)
-
+    matches = load_matches_for_season(season=season)
     team_history = build_team_match_history(matches)
     team_history = compute_rolling_averages(team_history, window=5)
 
     sample_match_id = matches.iloc[0]["match_id"]
     print(get_fixture_features(sample_match_id, team_history))
-
-

@@ -1,22 +1,22 @@
 from __future__ import annotations
 
-from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Dict, Optional
 import re
+
 import pandas as pd
-import json
 
-
-from mcp.server.fastmcp import FastMCP  # official Python SDK :contentReference[oaicite:2]{index=2}
+from mcp.server.fastmcp import FastMCP
 
 from src.fetch import FootballDataConfig, fetch_season_matches
 from src.render import RenderConfig, render_gameweek_outlook
 from src.evaluate import EvalConfig, evaluate_gameweek
 from src.performance import PerfConfig, refresh_artifacts
+from src.data_loader import curate_seasons
+from src.competitions import resolve_competition, list_competitions
 
 
-mcp = FastMCP("Premier League Predictor", json_response=True)
+mcp = FastMCP("Football Predictor", json_response=True)
 
 
 def _read_text(path: Path, max_chars: int = 25_000) -> str:
@@ -26,119 +26,92 @@ def _read_text(path: Path, max_chars: int = 25_000) -> str:
     return txt
 
 
-def _sanitize_for_x(text: str, max_len: int = 280) -> str:
-    # collapse whitespace, keep it punchy
-    text = re.sub(r"\s+", " ", text).strip()
-    if len(text) <= max_len:
-        return text
-    return text[: max_len - 1] + "…"
+@mcp.tool()
+def football_list_leagues() -> Dict[str, Any]:
+    """List all supported leagues with their codes, IDs, and season patterns."""
+    comps = list_competitions()
+    return {
+        "ok": True,
+        "leagues": [
+            {
+                "code": c.code,
+                "id": c.id,
+                "name": c.name,
+                "country": c.country,
+                "season_pattern": c.season_pattern,
+            }
+            for c in comps
+        ],
+    }
 
 
 @mcp.tool()
-def pl_fetch_season(
+def football_fetch_season(
     season: int,
-    competition_id: int = 2021,
+    league: Optional[str] = None,
+    competition_id: Optional[int] = None,
     raw_dir: str = "data/raw",
     processed_dir: str = "data/processed",
     force_refresh: bool = False,
 ) -> Dict[str, Any]:
-    """
-    Fetch season matches and write normalized CSV.
-    """
+    """Fetch season matches for any supported league and write normalized CSV. Use 'league' code (e.g. 'allsvenskan', 'pl') or numeric competition_id."""
+    comp_id = resolve_competition(league, competition_id)
     cfg = FootballDataConfig(
-        competition_id=competition_id,
+        competition_id=comp_id,
         raw_dir=Path(raw_dir),
         processed_dir=Path(processed_dir),
     )
     out_csv = fetch_season_matches(season=season, cfg=cfg, force_refresh=force_refresh)
-    return {"ok": True, "csv_path": str(out_csv)}
+    return {"ok": True, "csv_path": str(out_csv), "competition_id": comp_id}
+
 
 @mcp.tool()
-def pl_curate(
+def football_curate(
     seasons: list[int] = [2023, 2024, 2025],
-    competition_id: int = 2021,
+    league: Optional[str] = None,
+    competition_id: Optional[int] = None,
     processed_dir: str = "data/processed",
     curated_dir: str = "data/curated",
-    out_format: str = "csv",  # "csv" or "parquet"
+    out_format: str = "csv",
 ) -> Dict[str, Any]:
-    """
-    Merge processed season CSVs into a single curated dataset + manifest.
-    """
-    processed = Path(processed_dir)
-    curated = Path(curated_dir)
-    curated.mkdir(parents=True, exist_ok=True)
-
-    seasons = sorted(set(seasons))
-    in_paths = []
-    for s in seasons:
-        p = processed / f"matches_comp_{competition_id}_season_{s}.csv"
-        if not p.exists():
-            raise FileNotFoundError(f"Missing processed file for season {s}: {p}")
-        in_paths.append(p)
-
-    dfs = [pd.read_csv(p, parse_dates=["utc_date"]) for p in in_paths]
-    merged = pd.concat(dfs, ignore_index=True)
-
-    if "match_id" in merged.columns:
-        merged = merged.drop_duplicates(subset=["match_id"], keep="last")
-
-    sort_cols = [c for c in ["utc_date", "match_id"] if c in merged.columns]
-    if sort_cols:
-        merged = merged.sort_values(sort_cols).reset_index(drop=True)
-
-    out_name = f"matches_comp_{competition_id}_seasons_{seasons[0]}_{seasons[-1]}.{out_format}"
-    out_path = curated / out_name
-
-    if out_format == "csv":
-        merged.to_csv(out_path, index=False)
-    elif out_format == "parquet":
-        merged.to_parquet(out_path, index=False)
-    else:
-        raise ValueError("out_format must be 'csv' or 'parquet'")
-
-    manifest = {
-        "competition_id": competition_id,
-        "seasons": seasons,
-        "input_files": [str(p) for p in in_paths],
-        "output_file": str(out_path),
-        "row_count": int(len(merged)),
-        "column_count": int(len(merged.columns)),
-        "dedupe_key": "match_id" if "match_id" in merged.columns else None,
-    }
-    manifest_path = curated / f"{out_path.stem}.manifest.json"
-    manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
-
+    """Merge processed season CSVs into a single curated dataset + manifest. Supports any league."""
+    comp_id = resolve_competition(league, competition_id)
+    out_path, manifest_path = curate_seasons(
+        seasons=seasons,
+        competition_id=comp_id,
+        processed_dir=Path(processed_dir),
+        curated_dir=Path(curated_dir),
+        out_format=out_format,
+    )
     return {"ok": True, "curated_path": str(out_path), "manifest_path": str(manifest_path)}
 
+
 @mcp.tool()
-def pl_generate_outlook(
+def football_generate_outlook(
     season: int,
     gameweek: int,
-    competition_id: int = 2021,
+    league: Optional[str] = None,
+    competition_id: Optional[int] = None,
     window: int = 5,
     top_scorelines: int = 5,
     max_goals_grid: int = 5,
     reports_dir: str = "reports",
     predictions_dir: str = "data/predictions",
     save_predictions: bool = True,
-    # NEW:
-    model: str = "rolling",           # "rolling" or "strength"
+    model: str = "rolling",
     half_life_days: float = 60.0,
     l2: float = 1.0,
     lr: float = 0.05,
     max_iter: int = 250,
 ) -> Dict[str, Any]:
-    """
-    Generate the gameweek outlook markdown + (optionally) predictions JSON/CSV.
-    """
+    """Generate the gameweek outlook markdown + (optionally) predictions JSON/CSV. Supports any league."""
+    comp_id = resolve_competition(league, competition_id)
     cfg = RenderConfig(
         window=window,
         top_scorelines=top_scorelines,
         max_goals_grid=max_goals_grid,
         reports_dir=Path(reports_dir),
         predictions_dir=Path(predictions_dir),
-
-        # NEW:
         model=model,
         half_life_days=half_life_days,
         l2=l2,
@@ -149,7 +122,7 @@ def pl_generate_outlook(
     md_path = render_gameweek_outlook(
         season=season,
         gameweek=gameweek,
-        competition_id=competition_id,
+        competition_id=comp_id,
         cfg=cfg,
         save_predictions=save_predictions,
     )
@@ -162,20 +135,22 @@ def pl_generate_outlook(
     return payload
 
 
-
 @mcp.tool()
-def pl_evaluate_gameweek(
+def football_evaluate_gameweek(
     season: int,
     gameweek: int,
+    league: Optional[str] = None,
+    competition_id: Optional[int] = None,
     append: bool = True,
     refresh_cumulative: bool = True,
 ) -> Dict[str, Any]:
-    """
-    Evaluate saved predictions vs actual results, write review report, optionally append to ledger and refresh cumulative artifacts.
-    """
+    """Evaluate saved predictions vs actual results, write review report. Supports any league."""
+    comp_id = resolve_competition(league, competition_id)
+    cfg = EvalConfig(competition_id=comp_id)
     df, summary, review_path = evaluate_gameweek(
         season=season,
         gameweek=gameweek,
+        cfg=cfg,
         append=append,
         refresh_cumulative=refresh_cumulative,
     )
@@ -190,18 +165,16 @@ def pl_evaluate_gameweek(
 
 
 @mcp.tool()
-def pl_get_performance(
+def football_get_performance(
     season: Optional[int] = None,
 ) -> Dict[str, Any]:
-    """
-    Regenerate and return cumulative performance artifacts (md + plots).
-    """
+    """Regenerate and return cumulative performance artifacts (md + plots)."""
     artifacts = refresh_artifacts(season=season, cfg=PerfConfig())
     return {"ok": True, "artifacts": {k: str(v) for k, v in artifacts.items()}}
 
 
 @mcp.tool()
-def pl_compose_x_post_gameweek_outlook(
+def football_compose_x_post(
     season: int,
     gameweek: int,
     predictions_csv: str | None = None,
@@ -213,22 +186,16 @@ def pl_compose_x_post_gameweek_outlook(
     - 1 'goals' pick (highest lambda_home+lambda_away)
     Writes the draft to reports/x_posts/.
     """
-    import pandas as pd
-    from pathlib import Path
-    import re
-    
     if predictions_csv is None or not str(predictions_csv).strip():
         predictions_csv = f"data/predictions/season_{season}/gameweek_{gameweek}.csv"
 
-
     df = pd.read_csv(predictions_csv)
-    required = {"home_team","away_team","lambda_home","lambda_away","p_home_win","p_draw","p_away_win"}
+    required = {"home_team", "away_team", "lambda_home", "lambda_away", "p_home_win", "p_draw", "p_away_win"}
     missing = required - set(df.columns)
     if missing:
         raise ValueError(f"Predictions CSV missing columns: {sorted(missing)}")
 
-    # Confidence = max(probabilities)
-    df["conf"] = df[["p_home_win","p_draw","p_away_win"]].max(axis=1)
+    df["conf"] = df[["p_home_win", "p_draw", "p_away_win"]].max(axis=1)
 
     def outcome_label(r) -> str:
         if r["p_home_win"] >= r["p_draw"] and r["p_home_win"] >= r["p_away_win"]:
@@ -237,70 +204,54 @@ def pl_compose_x_post_gameweek_outlook(
             return "AWAY"
         return "DRAW"
 
-    def outcome_prob(r) -> float:
-        return float(max(r["p_home_win"], r["p_draw"], r["p_away_win"]))
-
     def best_scoreline(r) -> tuple[str, int]:
-        """
-        Prefer stored top scoreline if available; else fall back to rounded lambdas.
-        Returns (score_str, score_prob_percent).
-        """
         s = str(r.get("top_scoreline_1", "")).strip()
         p = r.get("top_scoreline_1_p", None)
 
         if s and p is not None and str(p) != "nan":
             return s, int(round(100 * float(p)))
 
-        # fallback if scorelines not present
         h = int(round(float(r["lambda_home"])))
         a = int(round(float(r["lambda_away"])))
         h = max(0, min(5, h))
         a = max(0, min(5, a))
         return f"{h}-{a}", -1
 
-
     df["pick"] = df.apply(outcome_label, axis=1)
-    df["pick_p"] = df.apply(outcome_prob, axis=1)
+    df["pick_p"] = df[["p_home_win", "p_draw", "p_away_win"]].max(axis=1)
     df["xg_total"] = df["lambda_home"].astype(float) + df["lambda_away"].astype(float)
-    df["score"] = df.apply(predicted_score, axis=1)
 
-    # Top 2 by confidence (exclude "DRAW" if you want more engaging content—optional)
+    # Top 2 by confidence
     top_conf = df.sort_values(["conf"], ascending=False).head(2)
 
-    # Top 1 by expected total goals (entertaining fixture)
+    # Top 1 by expected total goals
     top_goals = df.sort_values(["xg_total"], ascending=False).head(1)
 
     lines = []
-    lines.append(f"PL GW{gameweek} (Season {season}) — 3 quick calls:")
+    lines.append(f"PL GW{gameweek} (Season {season}) -- 3 quick calls:")
 
-    # Confidence picks
     for _, r in top_conf.iterrows():
         match = f"{r['home_team']} vs {r['away_team']}"
         pick = r["pick"]
         p = int(round(100 * float(r["pick_p"])))
-
         score, score_p = best_scoreline(r)
         score_part = f"{score}" if score_p < 0 else f"{score} ({score_p}%)"
+        lines.append(f"- {match}: {score_part} ({pick}, {p}%)")
 
-        lines.append(f"• {match}: {score_part} ({pick}, {p}%)")
-
-    # Goals pick
     r = top_goals.iloc[0]
     match = f"{r['home_team']} vs {r['away_team']}"
-    lines.append(f"• Goals watch: {match} (xG~{float(r['xg_total']):.1f})")
+    lines.append(f"- Goals watch: {match} (xG~{float(r['xg_total']):.1f})")
 
     if include_disclaimer:
-        lines.append("Not betting advice — analytics/entertainment only.")
+        lines.append("Not betting advice -- analytics/entertainment only.")
 
     x_post = "\n".join(lines)
 
-    # Keep under 280 chars (very rough cut if needed)
     x_post = re.sub(r"[ \t]+", " ", x_post).strip()
     if len(x_post) > 280:
-        # drop disclaimer first
         x_post = "\n".join(lines[:-1]).strip()
     if len(x_post) > 280:
-        x_post = x_post[:279] + "…"
+        x_post = x_post[:279] + "..."
 
     out_dir = Path("reports/x_posts")
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -310,8 +261,5 @@ def pl_compose_x_post_gameweek_outlook(
     return {"ok": True, "x_post": x_post, "saved_to": str(out_path)}
 
 
-
 if __name__ == "__main__":
-    # STDIO is the standard choice for local dev + desktop clients.
-    # In many setups, `mcp.run()` defaults to stdio; specifying explicitly is also fine.
     mcp.run(transport="stdio")
