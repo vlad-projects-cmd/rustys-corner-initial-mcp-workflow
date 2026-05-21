@@ -3,30 +3,15 @@
 from __future__ import annotations
 
 from pathlib import Path
-import pandas as pd
 from typing import Dict
+
+import pandas as pd
+import numpy as np
+
+from src.data_loader import load_matches_for_season
 
 
 DEFAULT_WINDOW = 5
-
-def resolve_matches_path(
-    competition_id: int = 2021,
-    season: int | None = None,
-    processed_dir: Path = Path("data/processed"),
-    curated_dir: Path = Path("data/curated"),
-) -> Path:
-    """
-    If season is None: return curated merged (must exist).
-    If season is provided: prefer curated merged + filter later, but return a path for loading.
-    """
-    curated_candidates = sorted(curated_dir.glob(f"matches_comp_{competition_id}_seasons_*.csv"))
-    if curated_candidates:
-        return curated_candidates[-1]
-
-    if season is None:
-        raise FileNotFoundError(f"No curated dataset found in {curated_dir}")
-
-    return processed_dir / f"matches_comp_{competition_id}_season_{season}.csv"
 
 
 def load_matches(csv_path: Path, season: int | None = None) -> pd.DataFrame:
@@ -36,13 +21,11 @@ def load_matches(csv_path: Path, season: int | None = None) -> pd.DataFrame:
     df = df.sort_values("utc_date").reset_index(drop=True)
     return df
 
+
 def build_team_match_history(df: pd.DataFrame) -> pd.DataFrame:
     """
     Transform match-level data into team-level rows.
-
-    One match -> two rows:
-    - home team row
-    - away team row
+    One match -> two rows (home team row + away team row).
     """
     home = df[
         [
@@ -103,24 +86,61 @@ def compute_rolling_averages(
     """
     Compute rolling GF/GA per team without leakage.
 
-    IMPORTANT:
-    - shift(1) ensures current match is excluded
+    Computes:
+    - gf_roll / ga_roll: overall rolling average (all venues)
+    - gf_home_roll / ga_home_roll: rolling average from HOME matches only
+    - gf_away_roll / ga_away_roll: rolling average from AWAY matches only
+
+    Uses transform with shift(1) inside each group to prevent
+    rolling windows from bleeding across team boundaries.
     """
     team_matches = team_matches.copy()
 
-    team_matches["gf_roll"] = (
-        team_matches.groupby("team_id")["goals_for"]
-        .shift(1)
-        .rolling(window, min_periods=1)
-        .mean()
+    # Overall rolling (all matches)
+    team_matches["gf_roll"] = team_matches.groupby("team_id")["goals_for"].transform(
+        lambda x: x.shift(1).rolling(window, min_periods=1).mean()
+    )
+    team_matches["ga_roll"] = team_matches.groupby("team_id")["goals_against"].transform(
+        lambda x: x.shift(1).rolling(window, min_periods=1).mean()
     )
 
-    team_matches["ga_roll"] = (
-        team_matches.groupby("team_id")["goals_against"]
-        .shift(1)
-        .rolling(window, min_periods=1)
-        .mean()
-    )
+    # Home/away split rolling averages
+    # For home-only: mask away matches as NaN, then forward-fill within rolling window
+    home_gf = team_matches["goals_for"].where(team_matches["is_home"])
+    away_gf = team_matches["goals_for"].where(~team_matches["is_home"])
+    home_ga = team_matches["goals_against"].where(team_matches["is_home"])
+    away_ga = team_matches["goals_against"].where(~team_matches["is_home"])
+
+    team_matches["gf_home_roll"] = team_matches.groupby("team_id")[[]].transform(
+        lambda x: pd.Series(np.nan, index=x.index)
+    ).iloc[:, 0] if False else None  # placeholder
+
+    # Proper venue-split computation using groupby + custom transform
+    def _venue_rolling(series: pd.Series, mask: pd.Series, window: int) -> pd.Series:
+        """Compute rolling mean on venue-filtered matches within each team group."""
+        # We need to do this per-team, so we'll build it outside groupby
+        result = pd.Series(np.nan, index=series.index)
+        return result
+
+    # More efficient approach: compute within grouped context
+    team_matches["gf_home_roll"] = np.nan
+    team_matches["ga_home_roll"] = np.nan
+    team_matches["gf_away_roll"] = np.nan
+    team_matches["ga_away_roll"] = np.nan
+
+    for team_id, group in team_matches.groupby("team_id"):
+        idx = group.index
+
+        # Home-only stats (NaN for away matches, then rolling ignores NaN)
+        hg = group["goals_for"].where(group["is_home"])
+        hga = group["goals_against"].where(group["is_home"])
+        ag = group["goals_for"].where(~group["is_home"])
+        aga = group["goals_against"].where(~group["is_home"])
+
+        team_matches.loc[idx, "gf_home_roll"] = hg.shift(1).rolling(window, min_periods=1).mean()
+        team_matches.loc[idx, "ga_home_roll"] = hga.shift(1).rolling(window, min_periods=1).mean()
+        team_matches.loc[idx, "gf_away_roll"] = ag.shift(1).rolling(window, min_periods=1).mean()
+        team_matches.loc[idx, "ga_away_roll"] = aga.shift(1).rolling(window, min_periods=1).mean()
 
     return team_matches
 
@@ -131,12 +151,7 @@ def get_fixture_features(
 ) -> Dict[str, float]:
     """
     Extract features for a single fixture.
-
-    Returns a dict keyed by:
-    - home_gf_avg
-    - home_ga_avg
-    - away_gf_avg
-    - away_ga_avg
+    Returns overall and venue-split rolling averages.
     """
     rows = team_matches[team_matches["match_id"] == match_id]
 
@@ -149,24 +164,25 @@ def get_fixture_features(
     return {
         "home_team": home["team_name"],
         "away_team": away["team_name"],
+        # Overall rolling
         "home_gf_avg": float(home["gf_roll"]),
         "home_ga_avg": float(home["ga_roll"]),
         "away_gf_avg": float(away["gf_roll"]),
         "away_ga_avg": float(away["ga_roll"]),
+        # Venue-split rolling (home team's home record, away team's away record)
+        "home_gf_at_home": float(home["gf_home_roll"]),
+        "home_ga_at_home": float(home["ga_home_roll"]),
+        "away_gf_at_away": float(away["gf_away_roll"]),
+        "away_ga_at_away": float(away["ga_away_roll"]),
     }
 
 
 if __name__ == "__main__":
-    competition_id = 2021
-    season = 2025  # pick one season to build rolling features correctly
+    season = 2025
 
-    path = resolve_matches_path(competition_id=competition_id, season=season)
-    matches = load_matches(path, season=season)
-
+    matches = load_matches_for_season(season=season)
     team_history = build_team_match_history(matches)
     team_history = compute_rolling_averages(team_history, window=5)
 
     sample_match_id = matches.iloc[0]["match_id"]
     print(get_fixture_features(sample_match_id, team_history))
-
-

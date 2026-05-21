@@ -70,13 +70,152 @@ Notes:
 4) Sum the grid into W/D/L probabilities.
 5) Render a gameweek report.
 
-## Repo structure (suggested)
+## Repo structure
 - `src/`
+  - `cli.py`              # command line entrypoint
+  - `mcp_server.py`       # MCP server (exposes tools for AI agents)
   - `fetch.py`            # API client + caching
   - `features.py`         # rolling metrics, league averages
   - `model_poisson.py`    # Poisson grid + W/D/L aggregation
-  - `render.py`           # markdown/json output
-  - `cli.py`              # command line entrypoint
+  - `model_strength.py`   # attack/defence strength model (gradient descent)
+  - `render.py`           # markdown/json output + prediction orchestration
+  - `evaluate.py`         # predictions vs actuals scoring
+  - `performance.py`      # cumulative performance artifacts
+  - `data_loader.py`      # shared data loading utilities
+  - `metrics.py`          # shared evaluation metrics + plotting
+- `tests/`                # pytest test suite
 - `data/`
   - `raw/`                # cached API responses
-  - `processed/`
+  - `processed/`          # normalized per-season CSVs
+  - `curated/`            # merged multi-season datasets
+  - `predictions/`        # saved prediction JSONs/CSVs
+  - `evaluation/`         # evaluation ledger
+
+## Setup
+
+### Prerequisites
+- Python 3.10+
+- A free API token from [football-data.org](https://www.football-data.org)
+
+### Install dependencies
+
+```bash
+pip install -r requirements.txt
+# or for development:
+pip install -e ".[dev]"
+```
+
+### Set your API token
+
+```bash
+export FOOTBALL_DATA_TOKEN=your_token_here
+```
+
+## CLI Usage
+
+All commands are run from the project root:
+
+```bash
+cd rustys-corner-initial-mcp-workflow
+```
+
+### List supported leagues
+
+```bash
+python -m src.cli leagues
+```
+
+Output:
+```
+Code            ID     League                    Country         Season
+---------------------------------------------------------------------------
+pl              2021   Premier League            England         split (Aug-May)
+championship    2016   Championship              England         split (Aug-May)
+laliga          2014   Primera Division          Spain           split (Aug-May)
+bundesliga      2002   Bundesliga                Germany         split (Aug-May)
+seriea          2019   Serie A                   Italy           split (Aug-May)
+ligue1          2015   Ligue 1                   France          split (Aug-May)
+eredivisie      2003   Eredivisie                Netherlands     split (Aug-May)
+primeira        2017   Primeira Liga             Portugal        split (Aug-May)
+brasileirao     2013   Campeonato Brasileiro     Brazil          calendar (Jan-Dec)
+ucl             2001   UEFA Champions League     Europe          split (Aug-May)
+euro            2018   European Championship     Europe          split (Aug-May)
+libertadores    2152   Copa Libertadores         South America   calendar (Jan-Dec)
+worldcup        2000   FIFA World Cup            World           split (Aug-May)
+```
+
+### Fetch match data
+
+```bash
+# Premier League (default)
+python -m src.cli fetch --season 2025
+
+# Any league using --league code
+python -m src.cli fetch --season 2025 --league laliga
+python -m src.cli fetch --season 2025 --league bundesliga
+python -m src.cli fetch --season 2026 --league brasileirao
+
+# Multiple seasons
+python -m src.cli fetch --seasons 2023 2024 2025 --league pl
+
+# Inclusive range
+python -m src.cli fetch --season-range 2022 2025 --league championship
+
+# Force re-download (ignore cache)
+python -m src.cli fetch --season 2025 --league pl --force-refresh
+```
+
+### Curate (merge seasons into one dataset)
+
+```bash
+python -m src.cli curate --seasons 2023 2024 2025 --league laliga
+```
+
+### Generate gameweek outlook (predictions)
+
+```bash
+# Rolling model (default) - Premier League
+python -m src.cli outlook --season 2025 --gameweek 3 --save-predictions
+
+# Bundesliga
+python -m src.cli outlook --season 2025 --gameweek 20 --league bundesliga --save-predictions
+
+# Brazilian Serie A with strength model (calendar-year season)
+python -m src.cli outlook --season 2026 --gameweek 10 --league brasileirao --model strength --save-predictions
+
+# With Dixon-Coles correction and previous seasons for training
+python -m src.cli outlook --season 2025 --gameweek 5 --league pl \
+  --model strength --dc-rho -0.10 --include-prev-seasons 2 --save-predictions
+```
+
+### Evaluate predictions vs actual results
+
+```bash
+python -m src.cli evaluate --season 2025 --gameweek 3 --league pl --append --refresh-cumulative
+python -m src.cli evaluate --season 2025 --gameweek 20 --league bundesliga --append
+```
+
+### Regenerate performance artifacts
+
+```bash
+python -m src.cli performance --season 2025
+```
+
+### Verify CLI help
+
+```bash
+python -m src.cli --help
+python -m src.cli fetch --help
+python -m src.cli outlook --help
+```
+
+### Notes on season numbering
+
+- **Split-year leagues** (PL, La Liga, etc.): `--season 2025` = the 2025/26 season
+- **Calendar-year leagues** (Allsvenskan, Eliteserien, Veikkausliiga): `--season 2026` = the 2026 season (Jan-Dec)
+
+## Running Tests
+
+```bash
+python -m pytest tests/ -v
+```

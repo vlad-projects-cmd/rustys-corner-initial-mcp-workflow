@@ -18,6 +18,12 @@ class StrengthConfig:
     max_iter: int = 250
     lr: float = 0.01
     tol: float = 1e-6
+    # Gradient clipping max norm
+    grad_clip_norm: float = 10.0
+    # Parameter clamp ranges
+    mu_clamp: tuple[float, float] = (-2.0, 2.0)
+    home_adv_clamp: tuple[float, float] = (-1.0, 1.0)
+    team_param_clamp: tuple[float, float] = (-3.0, 3.0)
 
 
 @dataclass(frozen=True)
@@ -149,9 +155,8 @@ def fit_strength_model(
         
         # Gradient clipping to prevent numerical blow-ups
         grad_norm = float(np.sqrt((grad * grad).sum()))
-        max_norm = 10.0
-        if grad_norm > max_norm:
-            grad = grad * (max_norm / (grad_norm + 1e-12))
+        if grad_norm > cfg.grad_clip_norm:
+            grad = grad * (cfg.grad_clip_norm / (grad_norm + 1e-12))
 
         theta = theta - float(cfg.lr) * grad
 
@@ -160,11 +165,11 @@ def fit_strength_model(
         d = theta[2 + n : 2 + 2 * n]
         theta[2 : 2 + n] = a - a.mean()
         theta[2 + n : 2 + 2 * n] = d - d.mean()
-        
+
         # Parameter clipping (keeps exp(.) in a sane range)
-        theta[0] = float(np.clip(theta[0], -2.0, 2.0))  # mu
-        theta[1] = float(np.clip(theta[1], -1.0, 1.0))  # home advantage
-        theta[2:] = np.clip(theta[2:], -3.0, 3.0)       # team params
+        theta[0] = float(np.clip(theta[0], *cfg.mu_clamp))
+        theta[1] = float(np.clip(theta[1], *cfg.home_adv_clamp))
+        theta[2:] = np.clip(theta[2:], *cfg.team_param_clamp)
 
 
     mu = float(theta[0])

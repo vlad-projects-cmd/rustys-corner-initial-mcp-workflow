@@ -6,3 +6,6 @@ gw3:
 
 eval_gw3:
 	python -m src.cli evaluate --season 2025 --gameweek 3 --append --refresh-cumulative
+
+test:
+	python -m pytest tests/ -v
