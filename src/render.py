@@ -433,12 +433,18 @@ def write_predictions(
     competition_id: int,
     cfg: RenderConfig,
 ) -> tuple[Path, Path]:
-    """Save predictions as JSON + CSV. Returns (json_path, csv_path)."""
+    """Save predictions as JSON + CSV. Returns (json_path, csv_path).
+
+    Files are stored per-model so different models don't overwrite each other:
+        data/predictions/season_{season}/gameweek_{gameweek}_{model_id}.json
+        data/predictions/season_{season}/gameweek_{gameweek}_{model_id}.csv
+    """
+    model_id = make_model_id(cfg)
     season_dir = cfg.predictions_dir / f"season_{season}"
     season_dir.mkdir(parents=True, exist_ok=True)
 
-    preds_json = season_dir / f"gameweek_{gameweek}.json"
-    preds_csv = season_dir / f"gameweek_{gameweek}.csv"
+    preds_json = season_dir / f"gameweek_{gameweek}_{model_id}.json"
+    preds_csv = season_dir / f"gameweek_{gameweek}_{model_id}.csv"
 
     # Strip internal _feats before saving
     clean_items = [{k: v for k, v in it.items() if not k.startswith("_")} for it in pred_items]

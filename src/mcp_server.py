@@ -9,7 +9,7 @@ import pandas as pd
 from mcp.server.fastmcp import FastMCP
 
 from src.fetch import FootballDataConfig, fetch_season_matches
-from src.render import RenderConfig, render_gameweek_outlook
+from src.render import RenderConfig, render_gameweek_outlook, make_model_id
 from src.evaluate import EvalConfig, evaluate_gameweek
 from src.performance import PerfConfig, refresh_artifacts
 from src.data_loader import curate_seasons
@@ -135,11 +135,12 @@ def football_generate_outlook(
         save_predictions=save_predictions,
     )
 
-    payload: Dict[str, Any] = {"ok": True, "report_path": str(md_path)}
+    payload: Dict[str, Any] = {"ok": True, "report_path": str(md_path), "model_id": make_model_id(cfg)}
     if save_predictions:
+        mid = make_model_id(cfg)
         season_dir = Path(predictions_dir) / f"season_{season}"
-        payload["predictions_json"] = str(season_dir / f"gameweek_{gameweek}.json")
-        payload["predictions_csv"] = str(season_dir / f"gameweek_{gameweek}.csv")
+        payload["predictions_json"] = str(season_dir / f"gameweek_{gameweek}_{mid}.json")
+        payload["predictions_csv"] = str(season_dir / f"gameweek_{gameweek}_{mid}.csv")
     return payload
 
 
@@ -149,10 +150,11 @@ def football_evaluate_gameweek(
     gameweek: int,
     league: Optional[str] = None,
     competition_id: Optional[int] = None,
+    model_id: Optional[str] = None,
     append: bool = True,
     refresh_cumulative: bool = True,
 ) -> Dict[str, Any]:
-    """Evaluate saved predictions vs actual results, write review report. Supports any league."""
+    """Evaluate saved predictions vs actual results, write review report. Supports any league. Use model_id to pick a specific model's predictions."""
     comp_id = resolve_competition(league, competition_id)
     cfg = EvalConfig(competition_id=comp_id)
     df, summary, review_path = evaluate_gameweek(
@@ -161,6 +163,7 @@ def football_evaluate_gameweek(
         cfg=cfg,
         append=append,
         refresh_cumulative=refresh_cumulative,
+        model_id=model_id,
     )
     return {
         "ok": True,
@@ -186,6 +189,7 @@ def football_compose_x_post(
     season: int,
     gameweek: int,
     predictions_csv: str | None = None,
+    model_id: str | None = None,
     include_disclaimer: bool = True,
 ) -> Dict[str, Any]:
     """
@@ -195,7 +199,16 @@ def football_compose_x_post(
     Writes the draft to reports/x_posts/.
     """
     if predictions_csv is None or not str(predictions_csv).strip():
-        predictions_csv = f"data/predictions/season_{season}/gameweek_{gameweek}.csv"
+        if model_id:
+            predictions_csv = f"data/predictions/season_{season}/gameweek_{gameweek}_{model_id}.csv"
+        else:
+            # Try to find any prediction CSV for this gameweek
+            season_dir = Path(f"data/predictions/season_{season}")
+            candidates = sorted(season_dir.glob(f"gameweek_{gameweek}_*.csv")) if season_dir.exists() else []
+            if candidates:
+                predictions_csv = str(candidates[0])
+            else:
+                predictions_csv = f"data/predictions/season_{season}/gameweek_{gameweek}.csv"
 
     df = pd.read_csv(predictions_csv)
     required = {"home_team", "away_team", "lambda_home", "lambda_away", "p_home_win", "p_draw", "p_away_win"}

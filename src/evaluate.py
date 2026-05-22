@@ -45,17 +45,66 @@ def _outcome_from_score(home_goals: int, away_goals: int) -> str:
     return "D"
 
 
+def _find_prediction_file(cfg: EvalConfig, season: int, gameweek: int, model_id: str | None) -> Path:
+    """Locate prediction JSON file: model-specific first, then legacy fallback."""
+    season_dir = cfg.predictions_dir / f"season_{season}"
+
+    if model_id:
+        path = season_dir / f"gameweek_{gameweek}_{model_id}.json"
+        if path.exists():
+            return path
+        raise FileNotFoundError(
+            f"Missing predictions file for model '{model_id}': {path}. "
+            f"Generate outlook with --save-predictions first."
+        )
+
+    # No model_id specified: look for legacy path first, then list available models
+    legacy = season_dir / f"gameweek_{gameweek}.json"
+    if legacy.exists():
+        return legacy
+
+    # Try to find any model-specific file for this gameweek
+    pattern = f"gameweek_{gameweek}_*.json"
+    found = sorted(season_dir.glob(pattern)) if season_dir.exists() else []
+    if len(found) == 1:
+        return found[0]
+    if len(found) > 1:
+        names = [f.stem.replace(f"gameweek_{gameweek}_", "") for f in found]
+        raise FileNotFoundError(
+            f"Multiple prediction files found for gameweek {gameweek}. "
+            f"Specify --model-id to pick one: {names}"
+        )
+
+    raise FileNotFoundError(
+        f"No predictions file found in {season_dir} for gameweek {gameweek}. "
+        f"Generate outlook with --save-predictions first."
+    )
+
+
+def list_saved_models(season: int, gameweek: int, cfg: EvalConfig = EvalConfig()) -> List[str]:
+    """Return model_ids that have saved predictions for this gameweek."""
+    season_dir = cfg.predictions_dir / f"season_{season}"
+    if not season_dir.exists():
+        return []
+    pattern = f"gameweek_{gameweek}_*.json"
+    found = sorted(season_dir.glob(pattern))
+    prefix = f"gameweek_{gameweek}_"
+    return [f.stem[len(prefix):] for f in found]
+
+
 def evaluate_gameweek(
     season: int,
     gameweek: int,
     cfg: EvalConfig = EvalConfig(),
     append: bool = False,
     refresh_cumulative: bool = False,
+    model_id: str | None = None,
 ) -> Tuple[pd.DataFrame, Dict[str, float], Path]:
     """
     Loads predictions for a given gameweek + actual results, computes per-match metrics and summary.
+    If model_id is provided, evaluates that specific model's predictions.
     """
-    preds_path = cfg.predictions_dir / f"season_{season}" / f"gameweek_{gameweek}.json"
+    preds_path = _find_prediction_file(cfg, season, gameweek, model_id)
     if not preds_path.exists():
         raise FileNotFoundError(
             f"Missing predictions file: {preds_path}. "
@@ -191,9 +240,10 @@ def evaluate_gameweek(
             "missing_results": float(missing_actual),
         }
 
-    # Write Markdown report
+    # Write Markdown report (include model_id in filename to avoid overwrites)
     cfg.reports_dir.mkdir(parents=True, exist_ok=True)
-    out_md = cfg.reports_dir / f"gameweek_{gameweek}_season_{season}_review.md"
+    review_suffix = f"_{model_id}" if model_id else ""
+    out_md = cfg.reports_dir / f"gameweek_{gameweek}_season_{season}{review_suffix}_review.md"
     out_md.write_text(_render_markdown_review(season, gameweek, preds_path, summary, df), encoding="utf-8")
 
     # Calibration outputs

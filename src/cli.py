@@ -7,7 +7,7 @@ from pathlib import Path
 
 from src.fetch import fetch_season_matches, FootballDataConfig
 from src.render import RenderConfig, render_gameweek_outlook
-from src.evaluate import evaluate_gameweek, EvalConfig
+from src.evaluate import evaluate_gameweek, list_saved_models, EvalConfig
 from src.performance import PerfConfig, refresh_artifacts
 from src.data_loader import curate_seasons
 from src.competitions import resolve_competition, list_competitions
@@ -80,6 +80,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_eval.add_argument("--season", type=int, required=True, help="Season year (e.g. 2025)")
     p_eval.add_argument("--gameweek", type=int, required=True, help="Matchday (gameweek)")
     _add_league_args(p_eval)
+    p_eval.add_argument("--model-id", type=str, default=None,
+                        help="Evaluate a specific model's predictions (e.g. 'rolling_w5_vw0.5_g5'). "
+                             "If omitted and multiple exist, lists available models.")
     p_eval.add_argument("--append", action="store_true", help="Append per-match evaluation rows to ledger")
     p_eval.add_argument("--refresh-cumulative", action="store_true", help="Regenerate cumulative performance artifacts")
 
@@ -95,6 +98,12 @@ def build_parser() -> argparse.ArgumentParser:
     # performance
     p_perf = sub.add_parser("performance", help="Generate cumulative performance artifacts from the evaluation ledger.")
     p_perf.add_argument("--season", type=int, default=None, help="Filter to a single season (optional)")
+
+    # models (list saved prediction models for a gameweek)
+    p_models = sub.add_parser("models", help="List saved prediction models for a gameweek.")
+    p_models.add_argument("--season", type=int, required=True, help="Season year")
+    p_models.add_argument("--gameweek", type=int, required=True, help="Matchday (gameweek)")
+    _add_league_args(p_models)
 
     return p
 
@@ -192,6 +201,7 @@ def cmd_evaluate(args: argparse.Namespace) -> int:
         cfg=cfg,
         append=args.append,
         refresh_cumulative=args.refresh_cumulative,
+        model_id=args.model_id,
     )
     print(f"OK: wrote {out_md}")
     if args.append:
@@ -227,6 +237,19 @@ def cmd_performance(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_models(args: argparse.Namespace) -> int:
+    competition_id = _get_competition_id(args)
+    cfg = EvalConfig(competition_id=competition_id)
+    models = list_saved_models(season=args.season, gameweek=args.gameweek, cfg=cfg)
+    if not models:
+        print(f"No saved predictions found for season {args.season}, gameweek {args.gameweek}.")
+        return 1
+    print(f"Saved models for season {args.season}, gameweek {args.gameweek}:")
+    for m in models:
+        print(f"  - {m}")
+    return 0
+
+
 def main() -> int:
     parser = build_parser()
     args = parser.parse_args()
@@ -243,6 +266,8 @@ def main() -> int:
         return cmd_curate(args)
     if args.command == "performance":
         return cmd_performance(args)
+    if args.command == "models":
+        return cmd_models(args)
     raise RuntimeError(f"Unknown command: {args.command}")
 
 
