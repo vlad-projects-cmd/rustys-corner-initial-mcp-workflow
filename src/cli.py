@@ -6,19 +6,31 @@ import argparse
 from pathlib import Path
 
 from src.fetch import fetch_season_matches, FootballDataConfig
+from src.fetch_apifootball import fetch_season_fixtures, APIFootballConfig
+from src.fetch_openfootball import (
+    fetch_season_matches as fetch_openfootball_matches,
+    OpenFootballConfig,
+)
+from src.fetch_thesportsdb import (
+    fetch_season_matches as fetch_thesportsdb_matches,
+    TheSportsDBConfig,
+)
 from src.render import RenderConfig, render_gameweek_outlook
 from src.evaluate import evaluate_gameweek, list_saved_models, EvalConfig
 from src.performance import PerfConfig, refresh_artifacts
 from src.data_loader import curate_seasons
-from src.competitions import resolve_competition, list_competitions
+from src.competitions import resolve_competition, list_competitions, get_competition_by_code
 
 
 def _add_league_args(parser: argparse.ArgumentParser) -> None:
-    """Add --league and --competition-id to a subparser (mutually informative, not exclusive)."""
+    """Add --league, --competition-id, and --source to a subparser."""
     parser.add_argument("--league", type=str, default=None,
-                        help="League short code (e.g. pl, allsvenskan, laliga). Use 'leagues' command to list all.")
+                        help="League short code (e.g. pl, mls, brasileirao-af). Use 'leagues' command to list all.")
     parser.add_argument("--competition-id", type=int, default=None,
-                        help="football-data.org numeric competition id (alternative to --league)")
+                        help="Numeric competition id (alternative to --league)")
+    parser.add_argument("--source", type=str, choices=["football-data", "apifootball", "openfootball", "thesportsdb", "auto"],
+                        default="auto",
+                        help="Data source API (default: auto-detect from league code)")
 
 
 def _get_competition_id(args: argparse.Namespace) -> int:
@@ -26,6 +38,20 @@ def _get_competition_id(args: argparse.Namespace) -> int:
     league = getattr(args, "league", None)
     comp_id = getattr(args, "competition_id", None)
     return resolve_competition(league, comp_id)
+
+
+def _resolve_source(args: argparse.Namespace) -> str:
+    """Determine data source: football-data, apifootball, openfootball, or thesportsdb."""
+    explicit = getattr(args, "source", "auto")
+    if explicit != "auto":
+        return explicit
+    # Auto-detect from league code
+    league = getattr(args, "league", None)
+    if league:
+        comp = get_competition_by_code(league)
+        if comp and comp.source in ("apifootball", "openfootball", "thesportsdb"):
+            return comp.source
+    return "football-data"
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -36,7 +62,9 @@ def build_parser() -> argparse.ArgumentParser:
     sub = p.add_subparsers(dest="command", required=True)
 
     # leagues
-    sub.add_parser("leagues", help="List all supported leagues and their codes.")
+    p_leagues = sub.add_parser("leagues", help="List all supported leagues and their codes.")
+    p_leagues.add_argument("--source", type=str, choices=["football-data", "apifootball", "openfootball", "thesportsdb"],
+                           default=None, help="Filter by data source")
 
     # fetch
     p_fetch = sub.add_parser("fetch", help="Fetch season matches and write normalized CSV.")
@@ -47,6 +75,7 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Inclusive season range (e.g. --season-range 2018 2025)")
     _add_league_args(p_fetch)
     p_fetch.add_argument("--force-refresh", action="store_true", help="Re-download even if cached")
+    p_fetch.add_argument("--no-verify-ssl", action="store_true", help="Disable SSL verification (for corporate proxies)")
     p_fetch.add_argument("--raw-dir", type=str, default="data/raw", help="Raw cache directory")
     p_fetch.add_argument("--processed-dir", type=str, default="data/processed", help="Processed data directory")
 
@@ -121,22 +150,19 @@ def _resolve_seasons(args: argparse.Namespace) -> list[int]:
 
 
 def cmd_leagues(args: argparse.Namespace) -> int:
-    comps = list_competitions()
-    print(f"{'Code':<15} {'ID':<6} {'League':<25} {'Country':<15} {'Season'}")
-    print("-" * 75)
+    source_filter = getattr(args, "source", None)
+    comps = list_competitions(source=source_filter)
+    print(f"{'Code':<18} {'ID':<6} {'League':<25} {'Country':<15} {'Source':<14} {'Season'}")
+    print("-" * 100)
     for c in comps:
         pattern = "calendar (Jan-Dec)" if c.season_pattern == "calendar" else "split (Aug-May)"
-        print(f"{c.code:<15} {c.id:<6} {c.name:<25} {c.country:<15} {pattern}")
+        print(f"{c.code:<18} {c.id:<6} {c.name:<25} {c.country:<15} {c.source:<14} {pattern}")
     return 0
 
 
 def cmd_fetch(args: argparse.Namespace) -> int:
     competition_id = _get_competition_id(args)
-    cfg = FootballDataConfig(
-        competition_id=competition_id,
-        raw_dir=Path(args.raw_dir),
-        processed_dir=Path(args.processed_dir),
-    )
+    source = _resolve_source(args)
 
     seasons = _resolve_seasons(args)
     wrote = []
@@ -144,8 +170,39 @@ def cmd_fetch(args: argparse.Namespace) -> int:
 
     for season in seasons:
         try:
-            out_csv = fetch_season_matches(season=season, cfg=cfg, force_refresh=args.force_refresh)
-            print(f"OK: season {season} -> {out_csv}")
+            if source == "thesportsdb":
+                league_code = getattr(args, "league", None) or "se-allsvenskan"
+                cfg_tsdb = TheSportsDBConfig(
+                    league_code=league_code,
+                    raw_dir=Path(args.raw_dir),
+                    processed_dir=Path(args.processed_dir),
+                    verify_ssl=not getattr(args, "no_verify_ssl", False),
+                )
+                out_csv = fetch_thesportsdb_matches(season=season, cfg=cfg_tsdb, force_refresh=args.force_refresh)
+            elif source == "openfootball":
+                league_code = getattr(args, "league", None) or "en-pl"
+                cfg_of = OpenFootballConfig(
+                    league_code=league_code,
+                    raw_dir=Path(args.raw_dir),
+                    processed_dir=Path(args.processed_dir),
+                )
+                out_csv = fetch_openfootball_matches(season=season, cfg=cfg_of, force_refresh=args.force_refresh)
+            elif source == "apifootball":
+                cfg_af = APIFootballConfig(
+                    league_id=competition_id,
+                    raw_dir=Path(args.raw_dir),
+                    processed_dir=Path(args.processed_dir),
+                )
+                out_csv = fetch_season_fixtures(season=season, cfg=cfg_af, force_refresh=args.force_refresh)
+            else:
+                cfg_fd = FootballDataConfig(
+                    competition_id=competition_id,
+                    raw_dir=Path(args.raw_dir),
+                    processed_dir=Path(args.processed_dir),
+                )
+                out_csv = fetch_season_matches(season=season, cfg=cfg_fd, force_refresh=args.force_refresh)
+
+            print(f"OK: [{source}] season {season} -> {out_csv}")
             wrote.append((season, out_csv))
         except Exception as e:
             print(f"ERROR: season {season} failed: {e}")
@@ -155,7 +212,7 @@ def cmd_fetch(args: argparse.Namespace) -> int:
         print(f"Done with failures. Succeeded: {len(wrote)}. Failed seasons: {failed}")
         return 2
 
-    print(f"Done. Fetched {len(wrote)} season(s).")
+    print(f"Done. Fetched {len(wrote)} season(s) from {source}.")
     return 0
 
 

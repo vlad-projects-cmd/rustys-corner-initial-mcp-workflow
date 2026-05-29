@@ -309,13 +309,143 @@ python -m src.cli outlook --season 2026 --gameweek 10 --league brasileirao --mod
 
 ---
 
+## Additional Data Sources
+
+Beyond football-data.org, the project supports two additional free data sources that require **no API key** and cover leagues currently in-season.
+
+### OpenFootball (GitHub — historical data, no API key)
+
+Fetches data directly from the [openfootball/football.json](https://github.com/openfootball/football.json) GitHub repo. Public domain. Covers 12 leagues across England, Germany, Spain, Italy, and France with 15+ years of history.
+
+```bash
+# List available OpenFootball leagues
+python -m src.cli leagues --source openfootball
+
+# Fetch Premier League 2024-25
+python -m src.cli fetch --season 2024 --league en-pl
+
+# Fetch multiple seasons of Bundesliga (2015-2025)
+python -m src.cli fetch --season-range 2015 2025 --league de-bundesliga
+
+# Fetch La Liga, Serie A, Ligue 1
+python -m src.cli fetch --season 2024 --league es-laliga
+python -m src.cli fetch --season 2024 --league it-seriea
+python -m src.cli fetch --season 2024 --league fr-ligue1
+
+# Fetch English lower leagues
+python -m src.cli fetch --season 2024 --league en-championship
+python -m src.cli fetch --season 2024 --league en-league1
+
+# Generate predictions using OpenFootball data
+python -m src.cli outlook --season 2025 --gameweek 30 --league en-pl \
+  --source openfootball --model ensemble --save-predictions
+
+# Evaluate
+python -m src.cli evaluate --season 2025 --gameweek 30 --league en-pl \
+  --source openfootball --model-id "ensemble_r35%_s35%_e30%_g5" --append
+```
+
+**Available leagues:** `en-pl`, `en-championship`, `en-league1`, `en-league2`, `de-bundesliga`, `de-2bundesliga`, `es-laliga`, `es-segunda`, `it-seriea`, `it-serieb`, `fr-ligue1`, `fr-ligue2`
+
+### TheSportsDB (free API — currently active calendar-year leagues)
+
+Fetches from [TheSportsDB](https://www.thesportsdb.com) free API. No registration or API key needed. Covers calendar-year leagues that are **currently active** (March–November).
+
+```bash
+# List available TheSportsDB leagues
+python -m src.cli leagues --source thesportsdb
+
+# Fetch Swedish Allsvenskan 2025 (currently in-season)
+python -m src.cli fetch --season 2025 --league se-allsvenskan --no-verify-ssl
+
+# Fetch Norwegian Eliteserien
+python -m src.cli fetch --season 2025 --league no-eliteserien --no-verify-ssl
+
+# Fetch Finnish Veikkausliiga
+python -m src.cli fetch --season 2025 --league fi-veikkausliiga --no-verify-ssl
+
+# Fetch Japanese J1 League
+python -m src.cli fetch --season 2025 --league jp-j1league --no-verify-ssl
+
+# Fetch Korean K League 1
+python -m src.cli fetch --season 2025 --league kr-kleague --no-verify-ssl
+
+# Fetch MLS (USA)
+python -m src.cli fetch --season 2025 --league us-mls --no-verify-ssl
+
+# Fetch previous seasons for training
+python -m src.cli fetch --season 2024 --league se-allsvenskan --no-verify-ssl
+python -m src.cli fetch --season 2023 --league se-allsvenskan --no-verify-ssl
+
+# Generate predictions for Allsvenskan matchday 15
+python -m src.cli outlook --season 2025 --gameweek 15 --league se-allsvenskan \
+  --model strength --save-predictions
+
+# Predict with Elo model for J1 League
+python -m src.cli outlook --season 2025 --gameweek 20 --league jp-j1league \
+  --model elo --save-predictions
+
+# Evaluate predictions
+python -m src.cli evaluate --season 2025 --gameweek 15 --league se-allsvenskan \
+  --model-id "strength_hl60_l21.00_lr0.050_it250_g5" --append --refresh-cumulative
+```
+
+**Available leagues:** `se-allsvenskan`, `no-eliteserien`, `fi-veikkausliiga`, `jp-j1league`, `kr-kleague`, `us-mls`
+
+**Note:** `--no-verify-ssl` is needed on machines with corporate proxy/SSL certificate issues. The free API has soft rate limits — if fetching many seasons consecutively, allow a few minutes between fetches.
+
+### Full workflow example (TheSportsDB)
+
+```bash
+# 1. Fetch data for Swedish league (current + previous seasons for training)
+python -m src.cli fetch --season 2023 --league se-allsvenskan --no-verify-ssl
+python -m src.cli fetch --season 2024 --league se-allsvenskan --no-verify-ssl
+python -m src.cli fetch --season 2025 --league se-allsvenskan --no-verify-ssl
+
+# 2. Generate predictions for multiple matchdays
+for gw in 5 6 7 8 9 10 11 12 13 14 15; do
+  python -m src.cli outlook --season 2025 --gameweek $gw --league se-allsvenskan \
+    --model rolling --include-prev-seasons 2 --save-predictions
+  python -m src.cli outlook --season 2025 --gameweek $gw --league se-allsvenskan \
+    --model elo --include-prev-seasons 2 --save-predictions
+done
+
+# 3. Evaluate all predictions
+for gw in 5 6 7 8 9 10 11 12 13 14 15; do
+  python -m src.cli evaluate --season 2025 --gameweek $gw --league se-allsvenskan \
+    --model-id "rolling_w5_vw0.5_g5" --append
+  python -m src.cli evaluate --season 2025 --gameweek $gw --league se-allsvenskan \
+    --model-id "elo_k30_ha65_co0.6" --append
+done
+
+# 4. View performance summary
+python -m src.cli performance --season 2025
+```
+
+### Data source auto-detection
+
+The `--source` flag is usually not needed — the CLI auto-detects the correct source from the league code:
+
+| League code prefix | Auto-detected source |
+|-------------------|---------------------|
+| `pl`, `laliga`, `bundesliga`, etc. | football-data.org |
+| `en-pl`, `de-bundesliga`, `es-laliga`, etc. | openfootball |
+| `se-allsvenskan`, `no-eliteserien`, `us-mls`, etc. | thesportsdb |
+
+You can override with `--source football-data`, `--source openfootball`, or `--source thesportsdb`.
+
+---
+
 ## Repo Structure
 
 ```
 src/
   cli.py              # command line entrypoint
   mcp_server.py       # MCP server (exposes tools for AI agents)
-  fetch.py            # API client + caching
+  fetch.py            # football-data.org API client + caching
+  fetch_apifootball.py # API-Football (api-sports.io) fetcher
+  fetch_openfootball.py # OpenFootball GitHub data fetcher (no API key)
+  fetch_thesportsdb.py # TheSportsDB free API fetcher (no API key)
   features.py         # rolling metrics, venue splits
   model_poisson.py    # Poisson grid + W/D/L aggregation
   model_strength.py   # attack/defence strength model (gradient descent)

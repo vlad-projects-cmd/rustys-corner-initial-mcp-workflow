@@ -61,7 +61,17 @@ class TestGetCompetition:
 class TestListCompetitions:
     def test_returns_all_free_tier(self):
         comps = list_competitions()
-        assert len(comps) == 13
+        assert len(comps) == 39  # 13 football-data + 8 apifootball + 12 openfootball + 6 thesportsdb
+
+    def test_filter_by_source(self):
+        fd_comps = list_competitions(source="football-data")
+        assert len(fd_comps) == 13
+        af_comps = list_competitions(source="apifootball")
+        assert len(af_comps) == 8
+        of_comps = list_competitions(source="openfootball")
+        assert len(of_comps) == 12
+        tsdb_comps = list_competitions(source="thesportsdb")
+        assert len(tsdb_comps) == 6
 
     def test_all_major_leagues_present(self):
         codes = {c.code for c in list_competitions()}
